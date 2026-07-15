@@ -1,0 +1,60 @@
+my_ebsynth_project/
+│
+├── setup.py                  # 🚀 AOT compilation and local package installation script
+├── pyebsynth.cpp             # 🌉 PyTorch ATen C++ gateway bridge binding layer
+├── pipeline.py               # 🕹️ Brand new Python master controller (replacing ebsynth.cpp)
+│
+├── include/
+│   └── ebsynth.h             # Macro defs, constraints (EBSYNTH_MAX_STYLE_CHANNELS, etc.)
+│
+└── src/
+    ├── ebsynth_cuda.cu       # Core PatchMatch GPU kernel logic (modified for D2D tracking)
+    ├── ebsynth_cuda.h        # C++ function signatures for the GPU pipeline wrapper
+    ├── ebsynth_cuda_check.h  # Real-time CUDA error trap handlers
+    ├── ebsynth_cuda_memarray2.h # Linear 2D VRAM wrapper grids
+    ├── ebsynth_cuda_texarray2.h # Texture 2D VRAM wrapper grids (modified for D2D tracking)
+    └── jzq.h                 # Lightweight mathematical vector helpers
+
+
+🐍 第一阶段：纯 Python 统治区（你需要用 Python 编写的部分）
+从零构建项目时，你首先要在 Python（pipeline.py）里依次实现以下任务：
+
+任务 A：参数接收与海关安检（替代原 C++ 的 tryToParseArg 逻辑）
+用 Python 的 argparse 读入用户输入的 -style、-guide、-patchsize 等参数，做安全范围检查（比如 patchsize 必须是大于 3 的奇数）。
+
+任务 B：图像秒开直通显存（平替原 C++ 的 tryLoad 逻辑）
+利用 torchvision.io.read_image 或是 PIL 把硬盘里的图片读进来。重点来了：读进来后直接执行 .cuda()，让风格图、导引图在第一秒钟就直接躺进显卡的 VRAM 里。
+
+任务 C：特征拧麻花合并（一行代码干掉原 C++ 几百行的多层大循环）
+利用 PyTorch 的张量拼接工具 torch.cat([guide_a, guide_b], dim=-1)，把多张导引图的通道原地合并成一个超级特征张量。
+
+任务 D：金字塔层数控制规划（平替原 C++ 尾部的数学计算）
+在 Python 里用简单的数学公式，算好每一层金字塔缩小后的高宽，并在 CPU 侧构建好 styleWeights、search_iters 等控制数组。
+
+任务 E：开辟输出画布
+在显存里原地创建一个全黑的空张量 output_image = torch.zeros(..., device="cuda")，准备用来接招。
+
+⚡ 第二阶段：CUDA 爆发区（分水岭，调用 C++ / CUDA 插件）
+当你在 Python 侧万事俱备，写下下面这行代码并敲击回车时，Python 的工作正式暂停，CUDA 宣告接管：
+
+Python
+ebsynth_cuda_ext.run_cuda(source_style, source_guides, ..., output_image)
+此时硬件底层在干嘛？
+控制权跨过 Python，进入 C++ 桥梁层（pyebsynth.cpp），通过 .data_ptr() 提取出这些 GPU 驻留张量的原生显存物理门牌号（裸指针）。
+
+门牌号一枪打进原作者写的 src/ebsynth_cuda.cu 里的 ebsynthRunCuda 函数。
+
+显卡内部的 DeviceToDevice 拷贝启动，把数据秒塞给显卡纹理内存，几千个 CUDA 核心瞬间满载轰鸣，疯狂执行 PatchMatch 随机寻址和投票重构。
+
+算完之后，结果被直接塞回到了你一开始开辟的那块 output_image 的显存门牌号里。
+
+🐍 第三阶段：重回 Python 统治区（算完收网）
+底层 CUDA 核心函数执行完毕，显卡发送完工中断，控制权重新交回 Python。此时你在 Python 里继续往下写：
+
+任务 F：导出落盘
+此时你的 output_image 已经从全黑变成了充满艺术转绘像素的完全体张量（且依然躺在 GPU 上）。你只需要在 Python 尾部用一行 torchvision.utils.save_image(output_image, "result.png") 把它保存到硬盘，整个项目圆满闭环！
+
+导师大白话小结
+你完全不需要用 Python 去重写显卡里面复杂的 PatchMatch 算法。
+
+你需要用 Python 写的，就是“第一阶段”的 A、B、C、D、E 和“第三阶段”的 F。 它们负责把食材准备好放进显存盘子里，然后高喊一声“CUDA 插件开饭！”，等 CUDA 吃饱吐出成果后，Python 负责把成果打包成文件。
