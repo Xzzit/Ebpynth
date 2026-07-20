@@ -63,8 +63,44 @@ def load_image_to_vram(file_path: str) -> torch.Tensor:
         sys.exit(1)
 
 
+def save_image_from_vram(gpu_tensor: torch.Tensor, file_path: str) -> None:
+    """
+    Lands a finished (H, W, C) uint8 GPU tensor back onto the disk as a PNG,
+    closing the loop opened by load_image_to_vram. Mirrors the original CLI's
+    stbi_write_png call (ebsynth.cpp line ~461), which always writes PNG
+    regardless of the output file's extension.
+    """
+    try:
+        # Return trip: VRAM -> RAM, and interleaved (H, W, C) back to planar (C, H, W)
+        cpu_tensor = gpu_tensor.permute(2, 0, 1).cpu().contiguous()
+        c = cpu_tensor.shape[0]
+
+        if c in (1, 3):
+            tv_io.write_png(cpu_tensor, file_path)
+        else:
+            # torchvision's PNG encoder only takes 1 or 3 channels; alpha-bearing
+            # outputs (2=gray+alpha, 4=RGBA) go through PIL like stb would
+            from PIL import Image
+            mode = "LA" if c == 2 else "RGBA"
+            Image.fromarray(gpu_tensor.cpu().numpy(), mode=mode).save(file_path, format="PNG")
+
+    except Exception as err:
+        print(f"error: failed to save '{file_path}'\nReason: {str(err)}", file=sys.stderr)
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    # Quick sandbox test for the image loading utility
-    test_image_path = "examples/video/video_frames/000.jpg"  # Replace with a valid image path for testing
+    # Quick sandbox test for the image loading utility (run from the repo root)
+    test_image_path = "examples/video/video_frames/000.jpg"
     tensor = load_image_to_vram(test_image_path)
     print(f"Loaded image tensor shape: {tensor.shape}, dtype: {tensor.dtype}, device: {tensor.device}")
+
+    # Round-trip test: save to a temp file, reload, and verify bytes survive intact
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        round_trip_path = os.path.join(tmp_dir, "round_trip.png")
+        save_image_from_vram(tensor, round_trip_path)
+        reloaded = load_image_to_vram(round_trip_path)
+        assert reloaded.shape == tensor.shape, f"shape changed: {tensor.shape} -> {reloaded.shape}"
+        assert torch.equal(reloaded, tensor), "pixel data corrupted in save/load round trip"
+    print("Save/load round-trip test passed ✓")
