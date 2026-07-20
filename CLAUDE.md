@@ -24,10 +24,29 @@ read `../ebsynth/src/ebsynth.cpp` (CLI/prep) or `../ebsynth/src/ebsynth_cuda.cu`
   `utils/pyramid_plan.py` (`plan_pyramid`), and `stylize.py` wired end-to-end: it runs A→E, prints the same
   hyper-parameter roll call as the original CLI, then exits at a `backend = None` gate. The Task K save call already
   sits after the gate and goes live the moment a backend exists.
-- **Not started — the synthesis engine:** a `synthesis/` package implementing PatchMatch in pure PyTorch, staged as
+- **In progress — the synthesis engine:** a `synthesis/` package implementing PatchMatch in pure PyTorch, staged as
   Tasks F–J in `README` (random NNF + vote imaging → PatchMatch propagation/search iterations → coarse-to-fine
   pyramid → uniformity term + stopthreshold → extrapass3x3), converging on one `ebsynth_run()` that replaces the
   gate in `stylize.py`.
+  - Task F: `synthesis/nnf.py` (`init_random_nnf`, NNF as int64 `(H_t, W_t, 2)` in (y, x) order with centers
+    bounded to `[r, size-1-r]` — an invariant all later stages must preserve so voting/cost/propagation/search
+    need no bounds checks) and `synthesis/vote.py` (`gather_image` single-pixel copy; `vote_image` plain-average
+    voting done as patch_size² sliced gathers instead of a scatter).
+  - Task G: `synthesis/cost.py` (`patch_cost` — style and guide channels concatenated into one weighted SSD,
+    since that's mathematically identical to summing them separately; `pad_target` replicate-pads the target
+    side by `r` so border patches need no bounds checks, source side never needs padding thanks to the NNF
+    invariant), `synthesis/propagate.py` (`propagate` — jump-flood at radii 4→2→1, **not** simple 1-pixel-offset
+    propagation; the original CUDA kernel already uses this exact scheme because it too runs fully parallel with
+    no serial scanline dependency, so it's reused as-is rather than simplified), `synthesis/random_search.py`
+    (`random_search` — doubling radius 1,2,4,... up to half the source's largest dimension), and
+    `synthesis/patchmatch.py` (`run_patchmatch` — one pyramid level's full match/vote loop, no uniformity term
+    and no pyramid yet). A 2-pixel border ring can never reach zero cost (replicate-padded edge content has no
+    match anywhere in the valid source region) — this is an inherent patch-based-synthesis artifact, not a bug;
+    the sandbox test separates "interior recovery rate" (the real correctness bar) from "whole-image mean cost"
+    for exactly this reason. Sandbox: `python synthesis/patchmatch.py` runs a synthetic identity-guide
+    convergence check, then a real-image milestone (`examples/video/temp/task_g_result.png` — recognizable
+    subject after 3 vote iters x 3 patchmatch iters, ~1s at 540x960 on GPU, no pyramid yet so noticeably rougher
+    than the eventual full pipeline).
 - **Reference-only, never build:** `ebpynth/` holds unmodified upstream source copies plus `include/ebsynth.h`
   (origin of the channel-limit constants). Its `setup.py` belongs to the abandoned native-extension route — do not
   run it. Likewise `../ebsynth/pyebsynth.cpp` + `run_test.py` (the old JIT bridge prototype) are only useful for
