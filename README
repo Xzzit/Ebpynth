@@ -1,36 +1,31 @@
 Ebpynth/
 │
-├── stylize.py                # 🕹️ Brand new Python master controller (replacing ebsynth.cpp's main())
+├── stylize.py                # 🕹️ Python 总控制器（A→E 已跑通，等合成引擎接入后全线贯通）
 │
 ├── arguments/
-│   └── parser.py             # ✅ Task A done: argparse-based CLI parsing + validation
+│   └── parser.py             # ✅ 任务 A：argparse CLI 解析 + 校验
 │
 ├── utils/
-│   ├── image_io.py           # ✅ Task B done: image → contiguous CUDA (H, W, C) uint8 tensor
-│   ├── guide_merge.py        # ✅ Task C done: torch.cat merging + resolution/channel checks
-│   └── pyramid_plan.py       # ✅ Task D done: pyramid level count + per-level/per-channel arrays
+│   ├── image_io.py           # ✅ 任务 B + 任务 K：图像 ⇄ contiguous CUDA (H, W, C) uint8 张量
+│   ├── guide_merge.py        # ✅ 任务 C：torch.cat 通道合并 + 分辨率/通道对齐/上限检查
+│   └── pyramid_plan.py       # ✅ 任务 D：金字塔层数 + 每层控制数组 + 权重向量
 │
-├── ebpynth/                  # Native extension package (the only C++/CUDA that survives)
-│   ├── setup.py              # 🚀 AOT compilation script (expects ebpynth.cpp + ebpynth.cu, 见下)
-│   ├── ebpynth.cpp           # 🌉 (待写) PyTorch ATen C++ gateway bridge binding layer
-│   │                         #     参考 ../ebsynth/pyebsynth.cpp（已验证可用的 JIT 原型）改造而来
-│   ├── ebpynth.cu            # ⚡ (待写) 由 src/ebsynth_cuda.cu 改造：H2D 拷贝改成 D2D（见第二阶段）
+├── synthesis/                # 🔥 (待写) 纯 PyTorch 合成引擎 —— 第二阶段任务 F~J 在这里逐步生长
+│
+├── ebpynth/                  # 📚 已降级为纯参考资料（不再编译！原生扩展路线已废弃）
+│   ├── setup.py              # (废弃) 原 AOT 编译脚本，仅作历史保留
 │   ├── include/
-│   │   └── ebsynth.h         # Macro defs, constraints (EBSYNTH_MAX_STYLE_CHANNELS=8, MAX_GUIDE=24)
-│   └── src/                  # 原版源码未修改的参考副本
-│       ├── ebsynth_cuda.cu       # Core PatchMatch GPU kernel logic
-│       ├── ebsynth_cuda.h        # C++ function signatures for the GPU pipeline wrapper
-│       ├── ebsynth_cuda_check.h  # Real-time CUDA error trap handlers
-│       ├── ebsynth_cuda_memarray2.h # Linear 2D VRAM wrapper grids
-│       ├── ebsynth_cuda_texarray2.h # Texture 2D VRAM wrapper grids（D2D 改造也涉及这里）
-│       └── jzq.h                 # Lightweight mathematical vector helpers
+│   │   └── ebsynth.h         # 常量出处：EBSYNTH_MAX_STYLE_CHANNELS=8, MAX_GUIDE_CHANNELS=24
+│   └── src/                  # 原版 C++/CUDA 源码未修改副本，对拍算法语义时查阅
+│       ├── ebsynth.cpp           # 原版 CLI main()：任务 A~E 的语义基准
+│       └── ebsynth_cuda.cu       # 原版 PatchMatch 内核：任务 F~J 重写时的算法教科书
 │
 └── examples/video/           # 测试素材：video_frames/ (原始帧) + output_frames/ (风格化结果)
 
 
-🐍 第一阶段：纯 Python 统治区（你需要用 Python 编写的部分）
-从零构建项目时，你首先要依次实现以下任务。每个任务做成独立模块（放在 arguments/、utils/ 等
-包里），各自带 __main__ 沙盒自测，最后统一在 stylize.py 里拼装调用：
+🐍 第一阶段：纯 Python 统治区（备菜——把所有食材摆进显存盘子）
+每个任务做成独立模块（放在 arguments/、utils/ 等包里），各自带 __main__ 沙盒自测，
+最后统一在 stylize.py 里拼装调用：
 
 任务 A：参数接收与海关安检（替代原 C++ 的 tryToParseArg 逻辑）✅ 已完成 → arguments/parser.py
 用 Python 的 argparse 读入用户输入的 -style、-guide、-patchsize 等参数，做安全范围检查
@@ -40,15 +35,14 @@ Ebpynth/
 任务 B：图像秒开直通显存（平替原 C++ 的 tryLoad 逻辑）✅ 已完成 → utils/image_io.py
 利用 torchvision.io.read_image 把硬盘里的图片读进来，直接执行 .cuda()，让风格图、导引图在
 第一秒钟就直接躺进显卡的 VRAM 里。两个实战里踩过的坑，必须守住：
-  ① .permute(1,2,0) 只改 stride 不搬内存，必须紧跟 .contiguous() 再 .cuda()，否则后面
-     data_ptr() 交给 CUDA 核时字节顺序是错的（静默出错，不报异常）；
+  ① .permute(1,2,0) 只改 stride 不搬内存，必须紧跟 .contiguous() 再 .cuda()；
   ② 要复刻原版 evalNumChannels 的通道折叠：不透明灰度 → 1 通道、灰度+有效透明 → 2 通道、
      不透明 RGBA → 3 通道等，连"原生 2 通道但 alpha 全不透明也要折叠成 1 通道"这种边角
      情况也要对齐。
 
 任务 C：特征拧麻花合并（一行 torch.cat 干掉原 C++ 几百行的多层大循环）✅ 已完成 → utils/guide_merge.py
 利用 torch.cat(..., dim=-1) 把多路导引图的通道合并成"超级特征张量"。注意产出是【两个】
-张量，不是一个（对应 CUDA 核签名里两个独立参数）：
+张量，不是一个：
   source_guides = torch.cat([每路 guide 的 source 图], dim=-1)  # (H_style, W_style, ΣC)
   target_guides = torch.cat([每路 guide 的 target 图], dim=-1)  # (H_target, W_target, ΣC)
 风格图本身不参与拼接，它是独立的一路。三个 torch.cat 替你查不了的检查要自己做：
@@ -63,52 +57,73 @@ Ebpynth/
 在 Python 里用简单的数学公式完成两件事（纯标量计算，结果留在 CPU 侧，不进显存）：
   ① 层数：若用户没指定 -pyramidlevels（即 -1），自动算最大可用层数——不断折半，直到最小边
      （style 和 target 四个尺寸里最小者）放不下一个 (2*patchsize+1) 为止；用户显式指定的层数
-     也会被静默钳制到这个上限。注意每层的具体高宽不用算——CUDA 内核拿到层数后自己推导
-     （ebsynth_cuda.cu 的 pyramidLevelSize），Python 只需给出层数这一个数；
+     也会被静默钳制到这个上限。注意每层的具体高宽不用算——合成引擎拿到层数后自己推导；
   ② 控制数组：构建每层的 search_vote_iters、patch_match_iters、stop_threshold 数组（CLI 语义
-     下就是同一标量复制 L 份，内核 API 允许每层不同但 CLI 从不利用），以及归一化后的权重向量
-     ——styleWeights[i] = styleWeight / 风格总通道数（styleWeight 缺省 1.0）；每路 guide 权重
-     缺省 1.0/guide 路数，再除以该路的通道数摊到每个通道上。
+     下就是同一标量复制 L 份），以及归一化后的权重向量——styleWeights[i] = styleWeight / 风格总
+     通道数（styleWeight 缺省 1.0）；每路 guide 权重缺省 1.0/guide 路数，再除以该路的通道数摊
+     到每个通道上。
 
-任务 E：开辟输出画布
+任务 E：开辟输出画布 ✅ 已完成 → stylize.py
 在显存里原地创建一个空张量准备接招：
   output_image = torch.zeros((H_target, W_target, C_style), dtype=torch.uint8, device="cuda")
 注意形状用 target guide 的分辨率 × 风格图的通道数，且天生 contiguous，不要再 permute 它。
 
-⚡ 第二阶段：CUDA 爆发区（分水岭，调用 C++ / CUDA 插件）
-当你在 Python 侧万事俱备，写下下面这行代码并敲击回车时，Python 的工作正式暂停，CUDA 宣告接管：
 
-Python
-ebsynth_cuda_ext.run_cuda(source_style, source_guides, ..., output_image)
+⚡ 第二阶段：纯 PyTorch 合成引擎（重写 PatchMatch 本体——当前战场）
 
-此时硬件底层在干嘛？
-控制权跨过 Python，进入 C++ 桥梁层（ebpynth.cpp），通过 .data_ptr() 提取出这些 GPU 驻留张量
-的原生显存物理门牌号（裸指针），一枪打进 ebpynth.cu 里的 ebsynthRunCuda 函数。
+【路线变更说明】原计划保留原版 CUDA 内核、用 pybind 桥接调用（所谓 D2D 改造路线），现已
+放弃，改用纯 PyTorch 张量运算重写整个合成算法。代价与收益：速度慢一个数量级左右（PyTorch
+算子本身仍跑在 GPU 上，不会退化成 CPU 速度），换来零编译、零裸指针、可单步调试、可随时把
+中间结果存成图看。ebpynth/ 目录从此降级为纯参考资料。另外注意：PatchMatch 带随机性，且并
+行传播顺序与原版不同，输出不会和原版逐字节一致——对拍标准是"视觉等价"，不是"字节相等"。
 
-⚠️ 这里有一个必须动手改内核的地方（"D2D 改造"）：原版 ebsynthRunCuda 假定收到的是【内存
-(host)指针】，内部用 HostToDevice 拷贝把数据搬进显卡纹理内存。而我们的张量已经躺在 VRAM 里，
-传进去的是【显存(device)指针】——必须把 ebpynth.cu（以及 texarray2 封装）里相应的拷贝方向改成
-DeviceToDevice，否则 cudaMemcpy 会按错误方向搬运，直接崩溃或搬出垃圾数据。这就是文件树里
-"modified for D2D tracking" 的含义。改造前可先跑 ../ebsynth/run_test.py（JIT 原型，用 CPU 张量
-走原版 H2D 路径）确认内核本身无恙，再动刀。
+算法核心是维护一张 NNF（最近邻场，Nearest-Neighbor Field）：形状 (H_target, W_target, 2)
+的整型张量，给 target 每个像素记录"它该抄 source 的哪个坐标"。整个第二阶段就是想方设法把
+这张表从瞎蒙优化到收敛。新代码统一放在 synthesis/ 包里，按任务逐模块生长，最后汇成一个
+ebsynth_run() 函数，拆掉 stylize.py 里 backend = None 的关卡。
 
-拷贝就位后，几千个 CUDA 核心瞬间满载轰鸣，疯狂执行 PatchMatch 随机寻址和投票重构。算完之后，
-结果被直接塞回到你一开始开辟的那块 output_image 的显存门牌号里。
+任务 F：随机瞎蒙 + 投票成像（先闭环，出一张"噪声马赛克"）
+随机初始化 NNF（坐标限制在合法 patch 范围内），然后实现"成像"：先用最简单的逐像素 gather
+（每个 target 像素直接抄 NNF 指向的那个 style 像素）跑通全流程，再升级成真正的投票 vote——
+每个 target 像素被 patchsize² 个 patch 覆盖，把这些 patch 各自指向的 style 像素平均起来
+（scatter_add / F.fold）。里程碑：输出一张由 style 像素乱拼的花屏，证明数据流全线贯通。
+
+任务 G：PatchMatch 迭代（花屏开始收敛成画面）
+先实现加权 patch 代价函数：
+  cost = Σ guide_weights·(source_guide patch − target_guide patch)²
+       + Σ style_weights·(source_style patch − 当前合成结果 patch)²
+（任务 D 那两个权重向量的用武之地。）然后每轮迭代做两件事：
+  传播——所有像素并行"抄邻居的答案"：把 NNF 上下左右 roll 一格得到候选，谁代价低听谁的。
+        这是对原版串行扫描传播的向量化改写，要多迭代几轮来换收敛；
+  随机搜索——在当前答案周围按指数衰减的半径撒随机候选，跳出局部最优。
+match 与 vote 交替执行 searchvoteiters 轮。里程碑：单层（无金字塔）合成出可辨认的风格化画面。
+
+任务 H：金字塔由粗到细（大结构不再错位）
+把任务 D 算好的层数用起来：用 F.interpolate 把 style/guides 逐层缩小，从最粗层开始合成，
+每层收敛后把 NNF 放大两倍（坐标值也要 ×2）作为下一层的初始值。里程碑：大色块结构稳定，
+输出质量接近原版。
+
+任务 I：uniformity 一致性项 + stopthreshold 提前收工
+用 scatter_add 统计 omega 图（source 每个像素被多少 patch 引用），把"过度使用"计入代价，
+逼迫算法均匀取材——这就是 -uniformity 参数（缺省 3500）的含义。同时实现 stopthreshold：
+每轮统计 NNF 里还在变动的像素数，低于阈值就提前结束本层迭代。
+
+任务 J：extrapass3x3 终局抛光
+复刻原版的可选收尾：金字塔跑完后，用 3×3 小 patch 在全分辨率上再加跑一轮 match+vote，把
+细节锐化一遍。至此 ebsynth_run() 完全体，backend = None 的关卡正式拆除，全项目闭环。
+
 
 🐍 第三阶段：重回 Python 统治区（算完收网）
-底层 CUDA 核心函数执行完毕，控制权重新交回 Python。此时你在 Python 里继续往下写：
 
-任务 F：导出落盘
-此时你的 output_image 已经从全黑变成了充满艺术转绘像素的完全体张量（且依然躺在 GPU 上，
-uint8 / (H, W, C)）。落盘用 torchvision.io.write_png：
-  tv_io.write_png(output_image.permute(2, 0, 1).cpu().contiguous(), config["output_file"])
-⚠️ 不要用 torchvision.utils.save_image —— 它期望的是 [0,1] 浮点 CHW 张量，喂 uint8 进去会被
-当成 0~255 的"浮点亮度"处理，图像直接全白报废。输出路径来自 -output 参数，不要写死。
+任务 K：导出落盘 ✅ 已完成 → utils/image_io.py (save_image_from_vram)
+合成完的 output_image（uint8 / (H, W, C)、依然躺在 GPU 上）用 torchvision.io.write_png 落盘
+（permute 回 CHW + .cpu()；2/4 通道 torchvision 编码器不支持，自动走 PIL 兜底写 LA/RGBA）。
+输出路径来自 -output 参数。stylize.py 里的调用已就位，合成引擎一接上即自动生效。
+⚠️ 不要用 torchvision.utils.save_image——它期望 [0,1] 浮点 CHW 张量，喂 uint8 会全白报废。
+
 
 导师大白话小结
-你完全不需要用 Python 去重写显卡里面复杂的 PatchMatch 算法。
-
-你需要用 Python 写的，就是"第一阶段"的 A、B、C、D、E 和"第三阶段"的 F。它们负责把食材准备好
-放进显存盘子里，然后高喊一声"CUDA 插件开饭！"，等 CUDA 吃饱吐出成果后，Python 负责把成果打包
-成文件。唯一需要碰 C++/CUDA 的地方只有两处：写 ebpynth.cpp 桥（照抄改造 ../ebsynth/pyebsynth.cpp）
-和给 ebpynth.cu 做 D2D 拷贝方向改造。
+现在整个项目是 100% Python：第一阶段 A~E 备菜（✅ 已完成），第二阶段 F~J 用 PyTorch 张量
+运算重写 PatchMatch 本体（🔥 当前战场，一次一个任务慢慢打），第三阶段 K 打包上桌（✅ 已完
+成）。你不需要写任何一行 C++/CUDA——原版内核 ebsynth_cuda.cu 只当算法教科书查阅，不再参与
+编译。
