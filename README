@@ -1,6 +1,6 @@
 Ebpynth/
 │
-├── stylize.py                # 🕹️ Python 总控制器（A→E 已跑通，等合成引擎接入后全线贯通）
+├── stylize.py                # 🕹️ Python 总控制器 —— ✅ 全线贯通，可直接当 CLI 使用
 │
 ├── arguments/
 │   └── parser.py             # ✅ 任务 A：argparse CLI 解析 + 校验
@@ -16,7 +16,9 @@ Ebpynth/
 │   ├── cost.py                # ✅ 任务 G ①：patch_cost 加权 SSD 代价函数（style+guide 合并通道）
 │   ├── propagate.py           # ✅ 任务 G ②：propagate 跳泛洪传播（jump 4→2→1）
 │   ├── random_search.py       # ✅ 任务 G ③：random_search 指数增长半径随机搜索
-│   └── patchmatch.py          # ✅ 任务 G ④：run_patchmatch 单层 match/vote 交替主循环
+│   ├── patchmatch.py          # ✅ 任务 G ④ + 任务 I 接入点：run_patchmatch 单层主循环
+│   ├── pyramid.py             # ✅ 任务 H + 任务 J：run_pyramid 由粗到细 + extrapass3x3 收尾
+│   └── uniformity.py          # ✅ 任务 I：Uniformity 均匀性占用惩罚（Omega 占用表）
 │
 ├── ebpynth/                  # 📚 已降级为纯参考资料（不再编译！原生扩展路线已废弃）
 │   ├── setup.py              # (废弃) 原 AOT 编译脚本，仅作历史保留
@@ -128,19 +130,59 @@ match 与 vote 交替执行 searchvoteiters 轮，每轮 patchmatchiters 次 传
 区域里根本找不到对应），这是所有基于 patch 的算法的固有边界伪影，不是 bug；沙盒测试里
 "全图平均代价"和"内部区域精确恢复率"分开断言，就是为了不被这层伪影误导。
 
-任务 H：金字塔由粗到细（大结构不再错位）
-把任务 D 算好的层数用起来：用 F.interpolate 把 style/guides 逐层缩小，从最粗层开始合成，
-每层收敛后把 NNF 放大两倍（坐标值也要 ×2）作为下一层的初始值。里程碑：大色块结构稳定，
-输出质量接近原版。
+任务 H：金字塔由粗到细（大结构不再错位）✅ 已完成 → synthesis/pyramid.py
+把任务 D 算好的层数用起来：每一层都用 F.interpolate 从【原始全分辨率】图像直接双线性缩放
+到该层尺寸（不是逐层从上一层再缩小——原版也是每层都从最细层重新采样，避免误差累积）。
+最粗层用随机 NNF 起步；之后每层收敛完，把 NNF 坐标 ×2 再加上 (x%2, y%2) 的抖动交给下一层
+当初始值——抖动是为了让放大后同一个粗格子对应的 2×2 个子像素不会全部挤在同一个起点上，
+白送下一层的搜索一点初始多样性。层与层之间复用任务 G 的 run_patchmatch 原样跑一遍，只是
+分辨率和迭代次数（来自 plan_pyramid 的 per-level 数组）不同。
+里程碑：540×960、6 层金字塔、默认超参数，10 秒内跑完，画面结构（猞猁的脸、眼睛、耳朵、
+胡须）清晰连贯，背景呈现出连续笔触感，相比任务 G 的单层版有质的提升
+（examples/video/temp/task_h_result.png）。
+⚠️ 原版 nnfUpscale 放大后钳制到 [patchSize, size-1-patchSize]，比我们自己"[r, size-1-r]"
+（r=patchSize/2）的不变量更严——和它自己的随机初始化用的边界都对不上，是原版自身不一致
+的地方。这里没有照抄，而是延续本项目统一的 [r, size-1-r] 不变量（更严的原版范围只是它的
+子集，不影响正确性，纯粹是原版的小瑕疵，不值得为了"字节对齐"引入不一致）。
 
-任务 I：uniformity 一致性项 + stopthreshold 提前收工
-用 scatter_add 统计 omega 图（source 每个像素被多少 patch 引用），把"过度使用"计入代价，
-逼迫算法均匀取材——这就是 -uniformity 参数（缺省 3500）的含义。同时实现 stopthreshold：
-每轮统计 NNF 里还在变动的像素数，低于阈值就提前结束本层迭代。
+任务 I：uniformity 一致性项 ✅ 已完成 → synthesis/uniformity.py
+用 scatter_add 维护一张 Omega 占用表（source 每个像素当前被多少 target patch 引用），把
+"过度使用"计入代价——这就是 -uniformity 参数（缺省 3500）的含义。核心是把原版 tryPatch 的
+"cost + lambda·占用率"决策公式搬过来：match/random search 每次接受一个候选时，不再只比较
+纯代价，而是比较"代价 + 权重×占用率"的综合分，接受后再用 scatter_add 把占用表从旧位置搬到
+新位置。Omega 的生命周期是"整个金字塔层"——同一层内所有 vote/patchmatch 迭代共用同一张、
+持续累积的占用表，换层才重新统计。
+里程碑：真实图片、默认超参数（uniformity_weight=3500）跑完整金字塔，画面细节（眼睛、胡须、
+毛发纹理、前景草叶）比任务 H 更锐利、更少重复感（examples/video/temp/task_i_result.png）；
+小场景定量验证：source 明显小于 target 时（16×16 vs 40×40 无关噪声，逼出鸽笼效应式的强制
+复用），加权重后 Omega 的方差从 ~40000 降到 ~27000、峰值使用次数从 884 降到 723，而总使用量
+（均值）分毫不变——证明这一项只是把"用得太狠"的地方摊薄，没有凭空增删使用总量。
+⚠️ 原版 stopthreshold 对应的 mask/dilate 跳过机制，本项目【有意不实现】：那是 CUDA 每线程
+独立执行模型下的性能优化（跳过重新计算已收敛像素），在我们全向量化的写法里，张量运算不会
+因为"跳过某些像素"而变快（没有真正的逐像素分支），而重新评估一个已经最优的像素也完全无害
+（传播/随机搜索只在严格更优时才替换，最优像素重新算一遍还是原地不动）——照抄这部分只会
+增加代码复杂度、不会带来任何实际收益，故不迁移。
 
-任务 J：extrapass3x3 终局抛光
-复刻原版的可选收尾：金字塔跑完后，用 3×3 小 patch 在全分辨率上再加跑一轮 match+vote，把
-细节锐化一遍。至此 ebsynth_run() 完全体，backend = None 的关卡正式拆除，全项目闭环。
+任务 J：extrapass3x3 终局抛光 ✅ 已完成 → synthesis/pyramid.py (run_pyramid 内)
+复刻原版的可选收尾（-extrapass3x3 开启才生效）：金字塔正常跑完后，如果开启这个开关，就用
+最细层的收敛结果（nnf、target_style 都不重新初始化）在同一分辨率上再跑一轮 run_patchmatch——
+只是这次 patch_size 强制改成 3（比用户设的patchsize更细，专门找小细节）、uniformity_weight
+强制归零（3×3 的小 patch 拼均匀性没有意义）。原版是把同一个 for 循环的 level 计数器减一、
+再走一遍最细层的循环体来实现这个"回头再抛光一次"，我们直接对最细层的 (nnf, target_style)
+再调一次 run_patchmatch，效果等价、可读性更好。
+里程碑：开启 vs 不开启 extrapass3x3 分别跑一遍真实图片，用拉普拉斯方差（一种常见的"锐度"
+量化指标）验证细节确实变锐利了，而不只是主观感觉（examples/video/temp/task_j_extrapass.png
+vs task_j_noextrapass.png）。⚠️ 调试时发现这个对比测试如果不固定随机种子，两次跑其实是两次
+完全独立的随机合成（每层随机 NNF、每次随机搜索的抽样都不同），extrapass3x3 带来的锐度提升
+会被运行间的自然波动淹没——已加 torch.manual_seed 让两次跑走完全相同的粗到细轨迹、只在
+extra pass 这一步分叉，测试才稳定。
+🕹️ stylize.py 直接调用 synthesis.run_pyramid(...)（原本多加了一层 ebsynth_run(config, plan)
+包装，后来觉得太单薄、纯粹是转发调用，已经去掉，config/plan 字典直接在 stylize.py 里解包
+传给 run_pyramid），backend = None 的关卡正式拆除；Task E 预分配的
+output_image 从"预留写入缓冲区"变成了纯粹的形状校验（assert）——本项目引擎是纯函数式风格
+（每一步都返回新张量，不做原地写入），这一点和 CUDA 版"直接把结果写回同一块显存"的方式不同，
+但对外行为完全等价。至此全项目命令行首次端到端跑通：
+  python stylize.py -style <风格图> -guide <src> <tgt> -output <输出路径> [-extrapass3x3]
 
 
 🐍 第三阶段：重回 Python 统治区（算完收网）
@@ -153,7 +195,8 @@ match 与 vote 交替执行 searchvoteiters 轮，每轮 patchmatchiters 次 传
 
 
 导师大白话小结
-现在整个项目是 100% Python：第一阶段 A~E 备菜（✅ 已完成），第二阶段 F~J 用 PyTorch 张量
-运算重写 PatchMatch 本体（🔥 当前战场，一次一个任务慢慢打），第三阶段 K 打包上桌（✅ 已完
-成）。你不需要写任何一行 C++/CUDA——原版内核 ebsynth_cuda.cu 只当算法教科书查阅，不再参与
-编译。
+现在整个项目是 100% Python，A~K 全部完成，stylize.py 可以当成 ebsynth 原版 CLI 的平替直接
+使用了。第一阶段 A~E 备菜，第二阶段 F~J 用 PyTorch 张量运算重写了整个 PatchMatch 本体
+（随机 NNF → 加权代价+传播+随机搜索 → 金字塔粗到细 → 均匀性约束 → extrapass3x3 收尾），
+第三阶段 K 打包上桌。你没有写任何一行 C++/CUDA——原版内核 ebsynth_cuda.cu 全程只当算法
+教科书查阅，从未参与编译；ebpynth/ 目录里的原生扩展骨架也就此彻底作废,可以随时删掉。

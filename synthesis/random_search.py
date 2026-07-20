@@ -6,7 +6,7 @@ except ImportError:
     from cost import patch_cost
 
 
-def random_search(nnf, cost, combined_source, combined_target_padded, weights, patch_size):
+def random_search(nnf, cost, combined_source, combined_target_padded, weights, patch_size, uniformity=None):
     """
     Replaces the growing-radius trial loop around krnlRandomSearchPass
     (ebsynth_cuda.cu ~line 355): for r = 1, 2, 4, 8, ... (doubling until half the
@@ -30,7 +30,13 @@ def random_search(nnf, cost, combined_source, combined_target_padded, weights, p
         cand_nnf = torch.stack([cand_y, cand_x], dim=-1)
 
         cand_cost = patch_cost(cand_nnf, combined_source, combined_target_padded, weights, patch_size)
-        improved = cand_cost < cost
+
+        if uniformity is None:
+            improved = cand_cost < cost
+        else:
+            improved = uniformity.score(cand_cost, cand_nnf) < uniformity.score(cost, nnf)
+            uniformity.update(nnf, cand_nnf, improved)
+
         nnf = torch.where(improved.unsqueeze(-1), cand_nnf, nnf)
         cost = torch.where(improved, cand_cost, cost)
 

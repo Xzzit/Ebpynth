@@ -6,7 +6,7 @@ except ImportError:
     from cost import patch_cost
 
 
-def propagate(nnf, cost, combined_source, combined_target_padded, weights, patch_size):
+def propagate(nnf, cost, combined_source, combined_target_padded, weights, patch_size, uniformity=None):
     """
     Jump-flood propagation, replacing krnlPropagationPass (ebsynth_cuda.cu ~line 187).
     The original runs on a serial scanline — each pixel reads a neighbor that was
@@ -20,8 +20,10 @@ def propagate(nnf, cost, combined_source, combined_target_padded, weights, patch
     For each jump distance r and each of 4 directions (-r,0)/(+r,0)/(0,-r)/(0,+r):
     "if my neighbor r pixels away is using source position s for itself, then
     s - offset is what my own patch would use if it shared that neighbor's alignment
-    — worth trying." All 5 options (current + 4 directions) are evaluated and the
-    cheapest wins, per pixel, in one vectorized shot.
+    — worth trying." Candidates are tried one direction at a time (not batched),
+    each immediately updating the running best — so a later direction's comparison
+    (and, with uniformity enabled, its occupancy bookkeeping) always sees the
+    outcome of the earlier ones, mirroring tryNeighborsOffset's sequential calls.
     """
     src_h, src_w, _ = combined_source.shape
     tgt_h, tgt_w = nnf.shape[0], nnf.shape[1]
@@ -52,7 +54,12 @@ def propagate(nnf, cost, combined_source, combined_target_padded, weights, patch
             cand_cost = patch_cost(cand_nnf, combined_source, combined_target_padded, weights, patch_size)
             cand_cost = torch.where(valid, cand_cost, torch.full_like(cand_cost, float("inf")))
 
-            improved = cand_cost < best_cost
+            if uniformity is None:
+                improved = cand_cost < best_cost
+            else:
+                improved = uniformity.score(cand_cost, cand_nnf) < uniformity.score(best_cost, best_nnf)
+                uniformity.update(best_nnf, cand_nnf, improved)
+
             best_nnf = torch.where(improved.unsqueeze(-1), cand_nnf, best_nnf)
             best_cost = torch.where(improved, cand_cost, best_cost)
 

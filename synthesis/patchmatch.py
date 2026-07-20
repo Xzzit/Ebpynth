@@ -5,22 +5,28 @@ try:
     from .propagate import propagate
     from .random_search import random_search
     from .vote import vote_image
+    from .uniformity import Uniformity
 except ImportError:
     from cost import build_cost_weights, build_combined_source, pad_target, patch_cost
     from propagate import propagate
     from random_search import random_search
     from vote import vote_image
+    from uniformity import Uniformity
 
 
 def run_patchmatch(nnf, source_style, source_guides, target_guides,
                     style_weights, guide_weights, patch_size,
-                    num_search_vote_iters, num_patch_match_iters):
+                    num_search_vote_iters, num_patch_match_iters,
+                    uniformity_weight=0.0):
     """
     Single pyramid level's worth of PatchMatch, replacing the per-level body of
     ebsynthCuda's main loop (ebsynth_cuda.cu ~lines 910-1063) — minus the
-    uniformity/occupancy term and the converged-pixel mask/stopthreshold skip
-    (both Task I; every pixel is fully re-evaluated every iteration here) and
-    minus the pyramid itself (Task H; this only ever runs at one resolution).
+    pyramid itself (Task H; this only ever runs at one resolution) and minus the
+    converged-pixel mask/stopthreshold skip: that mechanism only saves work in the
+    original's per-thread CUDA model (skip re-evaluating a pixel whose neighborhood
+    already stopped changing); in a fully vectorized rewrite there's no per-pixel
+    work to skip, and re-evaluating an already-optimal pixel is harmless (it just
+    won't improve further), so it's deliberately not ported — see README Task I.
 
     Structure mirrors the original exactly:
       for vote_iter in num_search_vote_iters:
@@ -29,6 +35,13 @@ def run_patchmatch(nnf, source_style, source_guides, target_guides,
               propagate, then random-search
           re-vote to refresh the running reconstruction from the (now better) NNF
 
+    uniformity_weight > 0 builds one Uniformity instance (synthesis/uniformity.py)
+    from the level's STARTING nnf and threads it through every propagate/
+    random_search call for the entire level — its occupancy state (Omega) is meant
+    to persist and accumulate across all vote/patchmatch iterations of one level,
+    only resetting when a new pyramid level begins (matching the original's Omega
+    lifetime, ebsynth_cuda.cu ~lines 885-906).
+
     Returns the final (nnf, target_style) — target_style is the running
     reconstruction, i.e. what stylize.py's output_image should become.
     """
@@ -36,14 +49,20 @@ def run_patchmatch(nnf, source_style, source_guides, target_guides,
     combined_source = build_combined_source(source_style, source_guides)
     target_style = vote_image(nnf, source_style, patch_size)
 
+    uniformity = None
+    if uniformity_weight > 0:
+        source_shape = (source_style.shape[0], source_style.shape[1])
+        target_shape = (nnf.shape[0], nnf.shape[1])
+        uniformity = Uniformity(nnf, source_shape, target_shape, patch_size, uniformity_weight)
+
     for _ in range(num_search_vote_iters):
         combined_target = torch.cat([target_style, target_guides], dim=-1)
         combined_target_padded = pad_target(combined_target, patch_size)
         cost = patch_cost(nnf, combined_source, combined_target_padded, weights, patch_size)
 
         for _ in range(num_patch_match_iters):
-            nnf, cost = propagate(nnf, cost, combined_source, combined_target_padded, weights, patch_size)
-            nnf, cost = random_search(nnf, cost, combined_source, combined_target_padded, weights, patch_size)
+            nnf, cost = propagate(nnf, cost, combined_source, combined_target_padded, weights, patch_size, uniformity)
+            nnf, cost = random_search(nnf, cost, combined_source, combined_target_padded, weights, patch_size, uniformity)
 
         target_style = vote_image(nnf, source_style, patch_size)
 

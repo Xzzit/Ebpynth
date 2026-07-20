@@ -1,8 +1,8 @@
 import sys
-import torch
 
 from arguments import parse_arguments
 from utils import load_image_to_vram, save_image_from_vram, merge_guides, plan_pyramid
+from synthesis import run_pyramid
 
 
 def main():
@@ -21,9 +21,6 @@ def main():
     # 🐍 Task D: Pure scalar math — pyramid schedule and per-channel weight vectors (stays on CPU)
     plan = plan_pyramid(config, source_style.shape, target_guides.shape, guide_channels)
 
-    # 🐍 Task E: Pre-allocate the output canvas in VRAM; the backend writes into it in place
-    output_image = torch.zeros((target_h, target_w, style_c), dtype=torch.uint8, device="cuda")
-
     # Hyper-parameter roll call, matching the original CLI printout (ebsynth.cpp lines ~430-436)
     print(f"uniformity: {config['uniformity_weight']:.0f}")
     print(f"patchsize: {config['patch_size']}")
@@ -33,15 +30,18 @@ def main():
     print(f"stopthreshold: {config['stop_threshold']}")
     print(f"extrapass3x3: {'yes' if config['extra_pass_3x3'] else 'no'}")
 
-    # ⚡ Phase 2: hand everything over to the synthesis backend. Every ingredient is plated:
-    #   source_style   (H_s, W_s, C_style) uint8 cuda   source_guides (H_s, W_s, ΣC) uint8 cuda
-    #   target_guides  (H_t, W_t, ΣC)      uint8 cuda   output_image  (H_t, W_t, C_style) zeros
-    #   plan: num_pyramid_levels + per-level iter/threshold arrays + style/guide weight vectors
-    backend = None  # will become the synthesis engine (ebsynthRunCuda equivalent)
-    if backend is None:
-        print("error: synthesis backend is not implemented yet — "
-              "pipeline verified up to the output canvas, stopping before writing output.", file=sys.stderr)
-        sys.exit(1)
+    # ⚡ Phase 2: hand everything over to the synthesis engine (Tasks F-J). It's built as
+    # pure-functional PyTorch (every stage returns a new tensor rather than writing into
+    # one shared buffer), so output_image's role is just a shape/dtype sanity check now,
+    # not a literal write-target the way the pre-CUDA-bridge plan originally assumed.
+    _, output_image = run_pyramid(
+        source_style, source_guides, target_guides,
+        plan["style_weights"], plan["guide_weights"], config["patch_size"],
+        plan["num_pyramid_levels"], plan["search_vote_iters_per_level"], plan["patch_match_iters_per_level"],
+        uniformity_weight=config["uniformity_weight"],
+        extra_pass_3x3=bool(config["extra_pass_3x3"]))
+    # 🐍 Task E's contract, checked rather than pre-allocated: (H_target, W_target, C_style)
+    assert output_image.shape == (target_h, target_w, style_c), "engine output shape drifted from the planned canvas"
 
     # 🐍 Task F: Land the finished canvas back onto the disk
     save_image_from_vram(output_image, config["output_file"])
