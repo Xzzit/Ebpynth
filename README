@@ -6,7 +6,9 @@ Ebpynth/
 │   └── parser.py             # ✅ Task A done: argparse-based CLI parsing + validation
 │
 ├── utils/
-│   └── image_io.py           # ✅ Task B done: image → contiguous CUDA (H, W, C) uint8 tensor
+│   ├── image_io.py           # ✅ Task B done: image → contiguous CUDA (H, W, C) uint8 tensor
+│   ├── guide_merge.py        # ✅ Task C done: torch.cat merging + resolution/channel checks
+│   └── pyramid_plan.py       # ✅ Task D done: pyramid level count + per-level/per-channel arrays
 │
 ├── ebpynth/                  # Native extension package (the only C++/CUDA that survives)
 │   ├── setup.py              # 🚀 AOT compilation script (expects ebpynth.cpp + ebpynth.cu, 见下)
@@ -44,7 +46,7 @@ Ebpynth/
      不透明 RGBA → 3 通道等，连"原生 2 通道但 alpha 全不透明也要折叠成 1 通道"这种边角
      情况也要对齐。
 
-任务 C：特征拧麻花合并（一行 torch.cat 干掉原 C++ 几百行的多层大循环）
+任务 C：特征拧麻花合并（一行 torch.cat 干掉原 C++ 几百行的多层大循环）✅ 已完成 → utils/guide_merge.py
 利用 torch.cat(..., dim=-1) 把多路导引图的通道合并成"超级特征张量"。注意产出是【两个】
 张量，不是一个（对应 CUDA 核签名里两个独立参数）：
   source_guides = torch.cat([每路 guide 的 source 图], dim=-1)  # (H_style, W_style, ΣC)
@@ -57,13 +59,16 @@ Ebpynth/
   ③ 通道总数上限：ΣC ≤ EBSYNTH_MAX_GUIDE_CHANNELS (24)，风格通道 ≤ MAX_STYLE_CHANNELS (8)。
 拼接完成后各张量保持 uint8 / (H, W, C) / CUDA / contiguous 的统一约定。
 
-任务 D：金字塔层数控制规划（平替原 C++ 尾部的数学计算）
-在 Python 里用简单的数学公式完成两件事：
-  ① 层数与尺寸：若用户没指定 -pyramidlevels（即 -1），自动算最大可用层数——不断折半，
-     直到最小边放不下一个 (2*patchsize+1) 为止；并算好每层缩小后的高宽；
-  ② 控制数组：构建每层的 search_vote_iters、patch_match_iters、stop_threshold 数组，以及
-     归一化后的权重向量——styleWeights[i] = styleWeight / 风格总通道数（styleWeight 缺省 1.0）；
-     每路 guide 权重缺省 1.0/guide 路数，再除以该路的通道数摊到每个通道上。
+任务 D：金字塔层数控制规划（平替原 C++ 尾部的数学计算）✅ 已完成 → utils/pyramid_plan.py
+在 Python 里用简单的数学公式完成两件事（纯标量计算，结果留在 CPU 侧，不进显存）：
+  ① 层数：若用户没指定 -pyramidlevels（即 -1），自动算最大可用层数——不断折半，直到最小边
+     （style 和 target 四个尺寸里最小者）放不下一个 (2*patchsize+1) 为止；用户显式指定的层数
+     也会被静默钳制到这个上限。注意每层的具体高宽不用算——CUDA 内核拿到层数后自己推导
+     （ebsynth_cuda.cu 的 pyramidLevelSize），Python 只需给出层数这一个数；
+  ② 控制数组：构建每层的 search_vote_iters、patch_match_iters、stop_threshold 数组（CLI 语义
+     下就是同一标量复制 L 份，内核 API 允许每层不同但 CLI 从不利用），以及归一化后的权重向量
+     ——styleWeights[i] = styleWeight / 风格总通道数（styleWeight 缺省 1.0）；每路 guide 权重
+     缺省 1.0/guide 路数，再除以该路的通道数摊到每个通道上。
 
 任务 E：开辟输出画布
 在显存里原地创建一个空张量准备接招：
