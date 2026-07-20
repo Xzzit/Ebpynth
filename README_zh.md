@@ -1,3 +1,5 @@
+简体中文 | [English](./README.md)
+
 Ebpynth/
 │
 ├── stylize.py                # 🕹️ Python 总控制器 —— ✅ 全线贯通，可直接当 CLI 使用
