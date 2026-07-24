@@ -4,8 +4,15 @@ import torch
 def gather_image(nnf, source_style):
     """
     Simplest possible imaging: each target pixel directly copies the single style
-    pixel its NNF entry points at. One flat-index gather, no averaging — the
-    training-wheels version used to verify the data flow before real voting.
+    pixel its NNF entry points at. One flat-index gather, no averaging — debug-only,
+    used to verify the data flow before real voting.
+
+    Args:
+        nnf: int64 CUDA tensor, shape (H_target, W_target, 2), (y, x) source coords.
+        source_style: uint8 CUDA tensor, shape (H_source, W_source, C).
+
+    Returns:
+        uint8 CUDA tensor, shape (H_target, W_target, C).
     """
     src_h, src_w, channels = source_style.shape
     flat_idx = nnf[..., 0] * src_w + nnf[..., 1]
@@ -24,6 +31,14 @@ def vote_image(nnf, source_style, patch_size):
 
     Relies on the NNF center invariant from init_random_nnf ([r, size-1-r]), which
     guarantees nnf[p] + d never leaves the source image.
+
+    Args:
+        nnf: int64 CUDA tensor, shape (H_target, W_target, 2), (y, x) source coords.
+        source_style: uint8 CUDA tensor, shape (H_source, W_source, C).
+        patch_size: odd int, side length of the square patch.
+
+    Returns:
+        uint8 CUDA tensor, shape (H_target, W_target, C) — the reconstructed image.
     """
     tgt_h, tgt_w = nnf.shape[0], nnf.shape[1]
     src_h, src_w, channels = source_style.shape

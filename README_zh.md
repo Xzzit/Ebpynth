@@ -18,7 +18,7 @@ Guide 合并到 PatchMatch 合成 Engine 的整条 Pipeline，全部重写成易
 ```
 Ebpynth/
 │
-├── stylize.py                   # 总入口：命令行 -> 解析 -> 加载 -> 合成 -> 保存图片
+├── stylize.py                   # 总入口：从解析参数到保存图片的全部主流程按顺序写在这里，包括金字塔循环和 match/vote 循环
 │
 ├── arguments/
 │   └── parser.py                # 用 argparse 读 CLI 参数，复刻 -weight 的"级联绑定"语义
@@ -28,14 +28,13 @@ Ebpynth/
 │   ├── guide_merge.py            # 把多路 guide 图的通道拼成两张"超级特征张量"（source 侧/target 侧）
 │   └── pyramid_plan.py           # 纯 CPU 标量数学：算金字塔层数 + 每层迭代次数 + 归一化权重向量
 │
-├── synthesis/                    # 合成引擎本体：PatchMatch 的纯 PyTorch 重写，全项目的核心
+├── synthesis/                    # PatchMatch 的积木函数，全部由 stylize.py 按顺序直接调用
 │   ├── nnf.py                    # 随机初始化 NNF（最近邻场）——整个引擎唯一要优化的"状态"
 │   ├── vote.py                   # 拿着 NNF 生成图像：gather（抄一个像素）/ vote（patch 平均投票）
 │   ├── cost.py                   # 算一个 NNF 好不好：加权 patch SSD 代价函数
 │   ├── propagate.py              # 让"好答案"在图上并行扩散——跳泛洪传播（jump-flood, 4→2→1）
 │   ├── random_search.py          # 让每个像素在自己当前答案附近随机探索，跳出局部最优
-│   ├── patchmatch.py             # 单一分辨率下的 match/vote 主循环，把上面几个模块串起来
-│   ├── pyramid.py                # 由粗到细金字塔调度 + 可选的 3x3 收尾抛光（extrapass3x3）
+│   ├── pyramid.py                # 金字塔数学：每层尺寸 / 图像缩放 / NNF 放大
 │   └── uniformity.py             # 均匀性惩罚：不让某几个 source patch 被无限复用
 │
 └── examples/video/                # 测试素材：video_frames/(原始帧) + output_frames/(风格化关键帧)
@@ -146,28 +145,27 @@ style 图不参与拼接，独立一路，留到成像阶段使用。`torch.cat`
 - **权重向量：** `style_weight`（缺省 1.0）均分给每个 style 通道；每组 guide 权重缺省 `1/组数`，再摊到
   该组自己的通道上。传给 `synthesis/cost.py` 决定每个通道在代价函数里的比重。
 
-### 阶段 4：合成引擎 —— `stylize.py` → `synthesis.run_pyramid`
+### 阶段 4：由粗到细逐层合成 —— `stylize.py`（主循环内联）
 
-`stylize.py` 把 `source_style`、`source_guides`、`target_guides` 和 `plan` 传给
-`synthesis.run_pyramid(...)`——引擎唯一的对外入口，其余细节封装在 `synthesis/` 包内：
+金字塔循环和 match/vote 循环直接写在 `stylize.py` 里，对应代码中的 4a/4b/4c 注释；`synthesis/`
+只提供每一步调用的积木函数。
 
-#### 4.1 由粗到细金字塔调度 —— `synthesis/pyramid.py: run_pyramid`
+#### 4.1 金字塔调度（4a + 4b）
 
-从最粗层跑到最细（原始分辨率）层，每层调一次 `run_patchmatch`（见 4.2），层间只传递 NNF。
+从最粗层跑到最细（原始分辨率）层，层间只传递 NNF：
 
-- `level_size`：原始分辨率乘 `2^-(num_levels-1-level)` 后取整（浮点缩放再截断，对齐原版
-  `pyramidLevelSize` 的取整方式，整数右移会有 1 像素误差）。
-- `resize_image`：每层都从原始全分辨率图双线性缩放而来，不逐层级联缩小，避免误差累积。
-- 最粗层：`init_random_nnf` 随机初始化。更细层：`upscale_nnf` 把上一层 NNF 坐标 ×2 并加
-  `(x%2, y%2)` 抖动作为初始值（避免同一粗格子对应的 2×2 子像素挤在同一起点，给下一层搜索一点初始
-  多样性）。
-- 逐层精修，最细层输出即最终结果，除非开启 `-extrapass3x3`（见 4.9）。
+- 4a 缩放：`level_size` 算本层宽高（原始分辨率乘 `2^-(num_levels-1-level)` 后取整，浮点缩放再截断，
+  对齐原版 `pyramidLevelSize`，整数右移会有 1 像素误差）；`resize_image` 每层都从原始全分辨率图
+  双线性缩放，不逐层级联缩小，避免误差累积。
+- 4b NNF 初值：最粗层 `init_random_nnf` 随机初始化；更细层 `upscale_nnf` 把上一层 NNF 坐标 ×2 并加
+  `(x%2, y%2)` 抖动（避免同一粗格子对应的 2×2 子像素挤在同一起点，给下一层搜索一点初始多样性）。
+- 最细层输出即最终结果，除非开启 `-extrapass3x3`（见 4.9）。
 
 > ⚠️ 原版 `nnfUpscale` 钳制到 `[patchSize, size-1-patchSize]`，比本项目统一用的 `[r, size-1-r]`
 > 更严，且与其自身 `nnfInitRandom` 的边界不一致。本项目不追随这处不一致，全程用同一套不变量
 > （原版范围是它的子集，不影响正确性）。
 
-#### 4.2 单层主循环 —— `synthesis/patchmatch.py: run_patchmatch`
+#### 4.2 单层 match/vote 循环（4c）
 
 每层的算法本体，结构照抄原版：
 
@@ -238,11 +236,10 @@ cost = Σ_channel  weight[c] · (target_patch[c] - source_patch[c])²
 > 手段。全向量化实现没有可省的逐像素分支，重算已收敛像素也无害（只在严格更优时才替换），因此故意
 > 不实现，仅为兼容 CLI 保留参数。
 
-#### 4.9 extrapass3x3 —— `synthesis/pyramid.py: run_pyramid` 内
+#### 4.9 extrapass3x3 —— `stylize.py` 阶段 4.9 段
 
-开启后，在最细层收敛结果 `(nnf, target_style)` 上原地再跑一次 `run_patchmatch`：`patch_size` 强制
-为 3，`uniformity_weight` 强制为 0，不重新初始化。原版做法是层计数器减一、重入最细层循环体，效果
-等价。
+开启后，在最细层收敛的 NNF 上再跑一遍同样的 match/vote 循环：`patch_size` 强制为 3，均匀性惩罚
+强制关闭，不重新初始化。原版做法是层计数器减一、重入最细层循环体，效果等价。
 
 ### 阶段 5：保存图片 —— `utils/image_io.py: save_image_from_vram`
 
@@ -257,7 +254,9 @@ cost = Σ_channel  weight[c] · (target_patch[c] - source_patch[c])²
 
 - 放弃 CUDA 桥接方案（原计划 pybind11 调用原版内核），改为纯 PyTorch 重写：零编译、可单步调试，代价
   是速度慢一个数量级（仍是 GPU 计算）。
-- `stylize.py` 直接调用 `run_pyramid`，删掉了纯转发的 `ebsynth_run(config, plan)` 包装层。
+- 主循环内联在 `stylize.py`：金字塔循环和 match/vote 循环直接按顺序写在入口文件里，`synthesis/` 只留
+  积木函数。曾经存在的 `run_pyramid`/`run_patchmatch` 包装层已删除，为的是"看一个文件就能看清数据
+  被一步步处理的全过程"。
 - 合成引擎是纯函数式风格：每步返回新张量，不做原地写入，与原版直接写回显存缓冲区的方式不同但行为等价。
 - `-stopthreshold`（4.8）、`nnfUpscale` 边界钳制（4.1）两处有意不追随原版，均已在正文标注。
 - 输出不追求与原版逐字节相同：PatchMatch 带随机性，并行传播顺序也不同，评判标准是视觉等价。

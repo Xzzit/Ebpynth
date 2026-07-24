@@ -10,6 +10,14 @@ def compute_omega(nnf, source_shape, patch_size):
     instead of gathering values FROM it — "which source pixels does this NNF
     touch" genuinely needs a scatter, unlike vote_image's "who covers me" question,
     which had a fixed slice per offset because it asked about the TARGET side.
+
+    Args:
+        nnf: int64 CUDA tensor, shape (H_target, W_target, 2), (y, x) source coords.
+        source_shape: (H_source, W_source) tuple.
+        patch_size: odd int, side length of the square patch.
+
+    Returns:
+        float32 CUDA tensor, shape (H_source, W_source) — occupancy count per pixel.
     """
     r = patch_size // 2
     src_h, src_w = source_shape
@@ -28,6 +36,14 @@ def ideal_omega(target_shape, source_shape, patch_size):
     pixels collectively make target_area * patch_size² claims; spread evenly over
     the source, patch_size² of those land on any given patch_size x patch_size
     window on average.
+
+    Args:
+        target_shape: (H_target, W_target) tuple.
+        source_shape: (H_source, W_source) tuple.
+        patch_size: odd int, side length of the square patch.
+
+    Returns:
+        float — the ideal (uniform-usage) occupancy scalar.
     """
     target_area = target_shape[0] * target_shape[1]
     source_area = source_shape[0] * source_shape[1]
@@ -47,12 +63,29 @@ class Uniformity:
     """
 
     def __init__(self, nnf, source_shape, target_shape, patch_size, weight):
+        """
+        Args:
+            nnf: int64 CUDA tensor, shape (H_target, W_target, 2) — this level's
+                 starting NNF, used to seed the occupancy table.
+            source_shape: (H_source, W_source) tuple.
+            target_shape: (H_target, W_target) tuple.
+            patch_size: odd int, side length of the square patch.
+            weight: float, the uniformity penalty weight (-uniformity CLI value).
+        """
         self.omega = compute_omega(nnf, source_shape, patch_size)
         self.ideal = ideal_omega(target_shape, source_shape, patch_size)
         self.weight = weight
         self.patch_size = patch_size
 
     def _patch_omega_sum(self, nnf):
+        """
+        Args:
+            nnf: int64 CUDA tensor, shape (H_target, W_target, 2).
+
+        Returns:
+            float32 CUDA tensor, shape (H_target, W_target) — summed occupancy
+            over each nnf-indicated patch window.
+        """
         r = self.patch_size // 2
         src_w = self.omega.shape[1]
         omega_flat = self.omega.reshape(-1)
@@ -64,6 +97,15 @@ class Uniformity:
         return total
 
     def score(self, cost, nnf):
+        """
+        Args:
+            cost: float32 CUDA tensor, shape (H_target, W_target) — raw patch cost.
+            nnf: int64 CUDA tensor, shape (H_target, W_target, 2).
+
+        Returns:
+            float32 CUDA tensor, shape (H_target, W_target) — cost plus the
+            occupancy penalty, used in place of raw cost for accept/reject decisions.
+        """
         occupancy_ratio = self._patch_omega_sum(nnf) / (self.patch_size * self.patch_size) / self.ideal
         return cost + self.weight * occupancy_ratio
 
@@ -74,6 +116,11 @@ class Uniformity:
         (not sliced) since old/new positions vary per pixel. scatter_add_ correctly
         accumulates when several pixels happen to land on the same source pixel in
         the same call, unlike a plain indexed write would.
+
+        Args:
+            old_nnf, new_nnf: int64 CUDA tensors, shape (H_target, W_target, 2).
+            changed: bool CUDA tensor, shape (H_target, W_target) — which pixels
+                     actually moved from old_nnf to new_nnf.
         """
         r = self.patch_size // 2
         src_w = self.omega.shape[1]
@@ -93,40 +140,47 @@ class Uniformity:
 if __name__ == "__main__":
     import os
     import sys
-    import time
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sys.path.insert(0, repo_root)
-    os.chdir(repo_root)
 
-    from utils import load_image_to_vram, save_image_from_vram, merge_guides, plan_pyramid
-    from arguments import parse_arguments
+    from synthesis.cost import build_cost_weights, build_combined_source, pad_target, patch_cost
     from synthesis.nnf import init_random_nnf
-    from synthesis.patchmatch import run_patchmatch
-    from synthesis.pyramid import run_pyramid
+    from synthesis.propagate import propagate
+    from synthesis.random_search import random_search
+    from synthesis.vote import vote_image
 
-    # ① Quantitative check: source deliberately much smaller than target (16x16 vs
+    # Quantitative check: source deliberately much smaller than target (16x16 vs
     # 40x40, both unrelated random noise so no "true" correspondence exists) forces
     # heavy source-patch reuse by pigeonhole. style_weights are zeroed so only the
-    # guide term drives matching, isolating the uniformity effect from vote's own
-    # behavior (already covered by synthesis/vote.py and synthesis/patchmatch.py).
+    # guide term drives matching. The match/vote loop below mirrors stylize.py's
+    # single-level structure (where the real loop now lives inline).
     torch.manual_seed(0)
     src_size, tgt_size, patch_size = 16, 40, 5
     noise_style = torch.randint(0, 256, (src_size, src_size, 3), dtype=torch.uint8, device="cuda")
     noise_source_guide = torch.randint(0, 256, (src_size, src_size, 3), dtype=torch.uint8, device="cuda")
     noise_target_guide = torch.randint(0, 256, (tgt_size, tgt_size, 3), dtype=torch.uint8, device="cuda")
-    style_weights = [0.0, 0.0, 0.0]
-    guide_weights = [1.0 / 3, 1.0 / 3, 1.0 / 3]
+    weights = build_cost_weights([0.0, 0.0, 0.0], [1.0 / 3, 1.0 / 3, 1.0 / 3])
 
     stats = {}
     for uw in (0.0, 3500.0):
         torch.manual_seed(1)
         nnf = init_random_nnf(tgt_size, tgt_size, src_size, src_size, patch_size)
-        final_nnf, _ = run_patchmatch(
-            nnf, noise_style, noise_source_guide, noise_target_guide,
-            style_weights, guide_weights, patch_size,
-            num_search_vote_iters=6, num_patch_match_iters=4, uniformity_weight=uw)
-        omega = compute_omega(final_nnf, (src_size, src_size), patch_size)
+        combined_source = build_combined_source(noise_style, noise_source_guide)
+        target_style = vote_image(nnf, noise_style, patch_size)
+        uniformity = None
+        if uw > 0:
+            uniformity = Uniformity(nnf, (src_size, src_size), (tgt_size, tgt_size), patch_size, uw)
+
+        for _ in range(6):
+            padded = pad_target(torch.cat([target_style, noise_target_guide], dim=-1), patch_size)
+            cost = patch_cost(nnf, combined_source, padded, weights, patch_size)
+            for _ in range(4):
+                nnf, cost = propagate(nnf, cost, combined_source, padded, weights, patch_size, uniformity)
+                nnf, cost = random_search(nnf, cost, combined_source, padded, weights, patch_size, uniformity)
+            target_style = vote_image(nnf, noise_style, patch_size)
+
+        omega = compute_omega(nnf, (src_size, src_size), patch_size)
         stats[uw] = (omega.max().item(), omega.var().item(), omega.mean().item())
         print(f"uniformity_weight={uw}: max={stats[uw][0]:.1f} var={stats[uw][1]:.1f} mean={stats[uw][2]:.1f}")
 
@@ -136,31 +190,3 @@ if __name__ == "__main__":
         "uniformity_weight did not meaningfully flatten the occupancy distribution"
     assert stats[3500.0][0] < stats[0.0][0], "uniformity_weight did not reduce peak source-patch overuse"
     print("Uniformity flattens occupancy without changing total usage ✓")
-
-    # ② Milestone: the full engine with the CLI's actual default uniformity_weight
-    # (3500) vs. it switched off, on the real example pair — visually, uniformity
-    # mainly shows up as reduced "stamping" of one favorite source patch across
-    # unrelated regions of the output.
-    config = parse_arguments([
-        "stylize.py",
-        "-style", "examples/video/output_frames/000.png",
-        "-guide", "examples/video/video_frames/000.jpg", "examples/video/video_frames/001.jpg",
-        "-output", "examples/video/temp/task_i_result.png",
-    ])
-    style = load_image_to_vram(config["style_file"])
-    source_guides, target_guides, guide_channels = merge_guides(config["guides"], style.shape, config["style_file"])
-    plan = plan_pyramid(config, style.shape, target_guides.shape, guide_channels)
-
-    t0 = time.time()
-    final_nnf, final_target_style = run_pyramid(
-        style, source_guides, target_guides,
-        plan["style_weights"], plan["guide_weights"], config["patch_size"],
-        plan["num_pyramid_levels"], plan["search_vote_iters_per_level"], plan["patch_match_iters_per_level"],
-        uniformity_weight=config["uniformity_weight"])
-    elapsed = time.time() - t0
-
-    save_image_from_vram(final_target_style, config["output_file"])
-    omega = compute_omega(final_nnf, (style.shape[0], style.shape[1]), config["patch_size"])
-    print(f"🏆 Task I milestone written to {config['output_file']} "
-          f"({elapsed:.1f}s, uniformity_weight={config['uniformity_weight']}, "
-          f"final source-occupancy max={omega.max().item():.1f} var={omega.var().item():.1f})")

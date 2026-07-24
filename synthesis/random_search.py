@@ -14,6 +14,18 @@ def random_search(nnf, cost, combined_source, combined_target_padded, weights, p
     +-r of its current match and keeps it if it's cheaper. Propagation alone only
     ever spreads matches that already exist somewhere in the image; this is what
     lets PatchMatch discover genuinely new, better matches and escape local optima.
+
+    Args:
+        nnf: int64 CUDA tensor, shape (H_target, W_target, 2), (y, x) source coords.
+        cost: float32 CUDA tensor, shape (H_target, W_target) — nnf's current cost.
+        combined_source: uint8 CUDA tensor, shape (H_source, W_source, C).
+        combined_target_padded: float32 CUDA tensor, shape (H_target+2r, W_target+2r, C).
+        weights: float32 CUDA tensor, shape (C,).
+        patch_size: odd int, side length of the square patch.
+        uniformity: optional Uniformity instance; None disables the occupancy penalty.
+
+    Returns:
+        (nnf, cost) — same shapes/dtypes as the inputs.
     """
     src_h, src_w, _ = combined_source.shape
     tgt_h, tgt_w = nnf.shape[0], nnf.shape[1]

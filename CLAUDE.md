@@ -6,103 +6,82 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A from-scratch, **100% Python + PyTorch** reimplementation of [ebsynth](https://github.com/jamriska/ebsynth) (the
 classic C++/CUDA example-based image synthesis tool). The original plan kept the upstream CUDA kernel behind a
-pybind11 bridge; that route has been **abandoned** — the PatchMatch synthesis itself is being rewritten in pure
-PyTorch tensor ops (an order of magnitude slower than the native kernel, still GPU-resident, chosen deliberately for
-readability and zero compilation). No C++/CUDA is ever compiled in this project anymore.
+pybind11 bridge; that route has been **abandoned** — the PatchMatch synthesis is rewritten in pure PyTorch tensor
+ops (an order of magnitude slower than the native kernel, still GPU-resident, chosen deliberately for readability
+and zero compilation). No C++/CUDA is ever compiled in this project anymore.
 
 The sibling directory `../ebsynth` is the **unmodified upstream C++/CUDA project** kept as the behavioral ground
-truth. For the preparation pipeline (Tasks A–E below) Python must match its semantics exactly (validation rules,
-channel-collapsing logic, default values, error message wording). For the synthesis engine rewrite, outputs will
-**not** match byte-for-byte — PatchMatch is randomized and the vectorized propagation order differs — so the bar
-there is visual equivalence against the original binary's output, not byte equality. When in doubt about semantics,
-read `../ebsynth/src/ebsynth.cpp` (CLI/prep) or `../ebsynth/src/ebsynth_cuda.cu` (algorithm) first.
+truth. For the preparation pipeline Python must match its semantics exactly (validation rules, channel-collapsing
+logic, default values, error message wording). For the synthesis engine, outputs will **not** match byte-for-byte —
+PatchMatch is randomized and the vectorized propagation order differs — so the bar there is visual equivalence
+against the original binary's output, not byte equality. When in doubt about semantics, read
+`../ebsynth/src/ebsynth.cpp` (CLI/prep) or `../ebsynth/src/ebsynth_cuda.cu` (algorithm) first.
 
 ## Current status
 
-**All of Tasks A–K are done. `stylize.py` is a working end-to-end CLI**, a drop-in replacement for the original
-`ebsynth` binary's basic usage (single style + N guide pairs -> one synthesized PNG). No C++/CUDA is compiled or
-loaded anywhere; `ebpynth/` (the abandoned native-extension scaffold) can be deleted whenever, it's dead weight.
+**The project is complete and working end-to-end.** `stylize.py` is a drop-in replacement for the original
+`ebsynth` binary's basic usage (single style + N guide pairs -> one synthesized PNG).
 
-- **Prep/IO side (Tasks A–E, K):** `arguments/parser.py` (CLI parsing with cascading `-weight`), `utils/image_io.py`
+**Architecture principle (a deliberate, user-requested flattening):** the entire main flow — prep stages AND the
+coarse-to-fine pyramid loop AND the per-level match/vote loop — is written out sequentially inside
+`stylize.py:main()`, so reading that one file gives the whole big picture of how data moves. The former
+`synthesis.run_pyramid` / `synthesis.run_patchmatch` wrapper functions were **removed** for exactly this reason
+(as was `synthesis/patchmatch.py` entirely). `synthesis/` now holds only leaf building blocks. Do not reintroduce
+intermediate orchestration wrappers; new pipeline steps go inline into `stylize.py`.
+
+- **Prep/IO:** `arguments/parser.py` (CLI parsing with cascading `-weight`), `utils/image_io.py`
   (`load_image_to_vram` + `save_image_from_vram`), `utils/guide_merge.py` (`merge_guides`), `utils/pyramid_plan.py`
   (`plan_pyramid`).
-- **The synthesis engine (Tasks F–J):** a `synthesis/` package implementing PatchMatch in pure PyTorch (random NNF +
-  vote imaging → PatchMatch propagation/search iterations → coarse-to-fine pyramid → uniformity term →
-  extrapass3x3), converging on `synthesis.ebsynth_run()`.
-  - Task F: `synthesis/nnf.py` (`init_random_nnf`, NNF as int64 `(H_t, W_t, 2)` in (y, x) order with centers
-    bounded to `[r, size-1-r]` — an invariant all later stages must preserve so voting/cost/propagation/search
-    need no bounds checks) and `synthesis/vote.py` (`gather_image` single-pixel copy; `vote_image` plain-average
-    voting done as patch_size² sliced gathers instead of a scatter).
-  - Task G: `synthesis/cost.py` (`patch_cost` — style and guide channels concatenated into one weighted SSD,
-    since that's mathematically identical to summing them separately; `pad_target` replicate-pads the target
-    side by `r` so border patches need no bounds checks, source side never needs padding thanks to the NNF
-    invariant), `synthesis/propagate.py` (`propagate` — jump-flood at radii 4→2→1, **not** simple 1-pixel-offset
-    propagation; the original CUDA kernel already uses this exact scheme because it too runs fully parallel with
-    no serial scanline dependency, so it's reused as-is rather than simplified), `synthesis/random_search.py`
-    (`random_search` — doubling radius 1,2,4,... up to half the source's largest dimension), and
-    `synthesis/patchmatch.py` (`run_patchmatch` — one pyramid level's full match/vote loop, no uniformity term
-    and no pyramid yet). A 2-pixel border ring can never reach zero cost (replicate-padded edge content has no
-    match anywhere in the valid source region) — this is an inherent patch-based-synthesis artifact, not a bug;
-    the sandbox test separates "interior recovery rate" (the real correctness bar) from "whole-image mean cost"
-    for exactly this reason. Sandbox: `python synthesis/patchmatch.py` runs a synthetic identity-guide
-    convergence check, then a real-image milestone (`examples/video/temp/task_g_result.png` — recognizable
-    subject after 3 vote iters x 3 patchmatch iters, ~1s at 540x960 on GPU, no pyramid yet so noticeably rougher
-    than the eventual full pipeline).
-  - Task H: `synthesis/pyramid.py` (`level_size` replicates `pyramidLevelSize`'s float-scale-then-truncate exactly;
-    `resize_image` bilinear-resamples from the ORIGINAL full-res tensor down to each level's size, never
-    progressively level-to-level, matching the original; `upscale_nnf` doubles a coarser level's converged NNF
-    plus an `(x%2, y%2)` jitter so a 2x2 child block doesn't collapse onto one identical starting patch;
-    `run_pyramid` drives coarsest-to-finest, calling `run_patchmatch` once per level with that level's resized
-    images and per-level iteration counts from `plan_pyramid`). Note: the original's `nnfUpscale` clamps to
-    `[patchSize, size-1-patchSize]` — stricter than, and inconsistent with, its own `nnfInitRandom`'s `[r,
-    size-1-r]` margin (r = patchSize/2). This project intentionally keeps one `[r, size-1-r]` invariant
-    everywhere instead (the original's is a strict subset, so nothing breaks) — a deliberate non-bug-for-bug
-    choice, consistent with this phase's "visual equivalence, not byte equality" bar. Sandbox:
-    `python synthesis/pyramid.py` checks level-size monotonicity and NNF upscale correctness, then runs the full
-    engine end-to-end with real default hyperparameters (`examples/video/temp/task_h_result.png` — 6 levels,
-    ~10s at 540x960, markedly more coherent than Task G's single-level milestone).
-  - Task I: `synthesis/uniformity.py` (`Uniformity` — bundles an Omega occupancy tensor, an ideal-occupancy target,
-    and the uniformity weight; `.score(cost, nnf)` replaces tryPatch's `cost + lambda*occupancy` decision formula,
-    `.update(old_nnf, new_nnf, changed)` scatter-moves the occupancy claim from old to new source position on
-    acceptance). One `Uniformity` instance is built once per pyramid level (in `run_patchmatch`, from that level's
-    starting NNF) and threaded through every `propagate`/`random_search` call for the entire level — its state
-    persists and accumulates across all vote/patchmatch iterations of that level, matching the original Omega's
-    lifetime (ebsynth_cuda.cu ~lines 885-906). `propagate`/`random_search` both take an optional `uniformity=None`
-    parameter (default preserves Tasks G/H's original pure-cost behavior exactly). Deliberately NOT ported: the
-    original's stopthreshold-driven mask/dilate pixel-skip (krnlEvalMask/krnlDilateMask) — it's a CUDA
-    per-thread performance shortcut with no analog benefit in a fully vectorized rewrite (skipping isn't cheaper
-    for a tensor op, and re-evaluating an already-optimal pixel is a no-op since propagate/random_search only ever
-    replace on strict improvement), so `stop_threshold_per_level` from `plan_pyramid` remains unused by design.
-    Sandbox: `python synthesis/uniformity.py` — a small forced-reuse scenario (16x16 source vs 40x40 unrelated-
-    noise target) shows uniformity_weight=3500 cutting Omega's variance from ~40000 to ~27000 and its peak from
-    884 to 723 while the mean (total occupancy) stays exactly conserved; then a real-image full-pipeline milestone
-    (`examples/video/temp/task_i_result.png`) with the CLI's actual default uniformity_weight.
-  - Task J: `synthesis/pyramid.py`'s `run_pyramid` gained an `extra_pass_3x3` flag — after the normal coarse-to-fine
-    loop finishes, if set, it calls `run_patchmatch` one more time on the finest level's own `(nnf, target_style)`
-    (not restarted from scratch), forcing `patch_size=3` and `uniformity_weight=0.0` regardless of what the caller
-    configured, replacing the original's `level--; patchSize=3; uniformityWeight=0` re-entry into its own finest
-    level (ebsynth_cuda.cu ~lines 1089-1095). There's no separate top-level entry point module — `stylize.py`
-    calls `run_pyramid` directly (an `ebsynth_run(config, plan)` wrapper existed briefly but was removed as
-    redundant pass-through; `stylize.py` just unpacks `config`/`plan` into `run_pyramid`'s arguments itself,
-    replacing `ebsynthRunCuda`, ebsynth_cuda.cu ~line 1103, as the call site). Sandbox: `python synthesis/pyramid.py`
-    (appended after the Task H milestone) runs the real example with `extrapass3x3` on and off — **seeded
-    identically before each run** so both take an identical coarse-to-fine path and only diverge at the extra pass;
-    without that seeding the comparison is two independent random syntheses whose natural variance swamps the
-    (real but smaller) sharpening effect, which is exactly what happened when this test was first merged in from
-    the old `run.py`. Asserts a Laplacian-variance sharpness proxy is higher with `extrapass3x3` on.
-- **Reference-only, never build:** `ebpynth/` holds unmodified upstream source copies plus `include/ebsynth.h`
-  (origin of the channel-limit constants). Its `setup.py` belongs to the abandoned native-extension route — do not
-  run it; it can be deleted. Likewise `../ebsynth/pyebsynth.cpp` + `run_test.py` (the old JIT bridge prototype) are
-  only useful for sanity-running the original kernel to produce reference output.
+- **Synthesis building blocks (`synthesis/`):**
+  - `nnf.py` — `init_random_nnf`. NNF is int64 `(H_t, W_t, 2)` in (y, x) order with centers bounded to
+    `[r, size-1-r]` (r = patch_size // 2) — an invariant every stage preserves so voting/cost/propagation/search
+    need no bounds checks.
+  - `vote.py` — `gather_image` (single-pixel copy, debug only); `vote_image` (plain-average voting done as
+    patch_size² sliced gathers instead of a scatter).
+  - `cost.py` — `patch_cost`: style and guide channels concatenated into one weighted SSD (mathematically identical
+    to summing them separately); `pad_target` replicate-pads the target side by `r` so border patches need no
+    bounds checks; the source side never needs padding thanks to the NNF invariant. A 2-pixel border ring can never
+    reach zero cost (replicate-padded edge content has no match in the valid source region) — an inherent
+    patch-based-synthesis artifact, not a bug; tests separate "interior recovery rate" (the real correctness bar)
+    from "whole-image mean cost" for this reason.
+  - `propagate.py` — jump-flood at radii 4→2→1, **not** simple 1-pixel-offset propagation; the original CUDA kernel
+    already uses this exact scheme because it too runs fully parallel with no serial scanline dependency. The four
+    directions are tried sequentially (each immediately updates the running best), mirroring `tryNeighborsOffset`.
+  - `random_search.py` — doubling radius 1,2,4,... up to half the source's largest dimension.
+  - `pyramid.py` — pyramid math only: `level_size` (replicates `pyramidLevelSize`'s float-scale-then-truncate
+    exactly; an integer shift can be off by one), `resize_image` (always bilinear-resamples from the ORIGINAL
+    full-res tensor, never progressively level-to-level, matching the original), `upscale_nnf` (doubles a coarse
+    NNF plus an `(x%2, y%2)` jitter so a 2x2 child block doesn't collapse onto one identical starting patch).
+    Note: the original's `nnfUpscale` clamps to `[patchSize, size-1-patchSize]` — stricter than, and inconsistent
+    with, its own `nnfInitRandom`'s `[r, size-1-r]`. This project intentionally keeps one `[r, size-1-r]`
+    invariant everywhere (the original's is a strict subset, so nothing breaks) — a deliberate non-bug-for-bug
+    choice consistent with the "visual equivalence, not byte equality" bar.
+  - `uniformity.py` — `Uniformity` bundles an Omega occupancy tensor, an ideal-occupancy target, and the weight;
+    `.score(cost, nnf)` replaces tryPatch's `cost + lambda*occupancy` decision formula, `.update(...)`
+    scatter-moves occupancy claims on acceptance. One instance is built per pyramid level (in `stylize.py`'s
+    per-level block, from that level's starting NNF) and threaded through every `propagate`/`random_search` call
+    for the entire level — its state accumulates across all vote/patchmatch iterations of that level, matching the
+    original Omega's lifetime (ebsynth_cuda.cu ~lines 885-906). `propagate`/`random_search` take `uniformity=None`
+    to disable the term.
+- **In `stylize.py` itself:** the pyramid loop (resize → NNF init/upscale → match/vote loop, stages 4a/4b/4c) and
+  the optional extrapass3x3 block (re-runs the match/vote loop on the finest level's converged NNF with
+  `patch_size=3` and uniformity off, replacing the original's `level--; patchSize=3; uniformityWeight=0` re-entry,
+  ebsynth_cuda.cu ~lines 1089-1095).
+- **Deliberately NOT ported:** the original's stopthreshold-driven mask/dilate pixel-skip
+  (krnlEvalMask/krnlDilateMask) — a CUDA per-thread performance shortcut with no analog benefit in a fully
+  vectorized rewrite (skipping isn't cheaper for a tensor op, and re-evaluating an already-optimal pixel is a
+  no-op since propagate/random_search only replace on strict improvement). `stop_threshold_per_level` from
+  `plan_pyramid` is unused by design; `-stopthreshold` is parsed only for CLI compatibility.
 
-Follow the project's staged plan in `README` (in Chinese, Tasks A–K, all now checked off). If picking up further
-work here, keep the established rhythm: **one task/change at a time with user review in between.**
+Docs: `README.md` (English, concise, public-facing) and `README_zh.md` (Chinese, detailed — the user's primary
+reading copy; its 阶段/4a/4b/4c structure mirrors `stylize.py`'s section comments, keep them in sync). If picking
+up further work, keep the established rhythm: **one task/change at a time with user review in between.**
 
 ## Commands
 
 Dev environment: conda env `ezsynth` (torch with CUDA, `torch.cuda.is_available()` is True).
 
-No test suite or lint config; each module ends with an `if __name__ == "__main__"` sandbox check with asserts.
+No test suite or lint config; modules end with an `if __name__ == "__main__"` sandbox check with asserts.
 Run everything from the repo root:
 
 ```bash
@@ -110,22 +89,25 @@ python arguments/parser.py      # parser sandbox (mock CLI invocation)
 python utils/image_io.py        # load + save/load round-trip test (uses examples/)
 python utils/guide_merge.py     # merge + channel-alignment asserts (uses examples/, needs CUDA)
 python utils/pyramid_plan.py    # pyramid/weight math asserts (pure CPU)
-python synthesis/vote.py        # Task F: identity-NNF exactness check + mosaic milestones
-python synthesis/patchmatch.py  # Task G: synthetic convergence check + single-level milestone
-python synthesis/pyramid.py     # Task H + J: level-size/upscale checks, full-pyramid milestone,
-                                 #             extrapass3x3 sharpness check + before/after milestones
-python synthesis/uniformity.py  # Task I: occupancy-flattening check + milestone
+python synthesis/vote.py        # identity-NNF exactness check + mosaic milestones
+python synthesis/propagate.py   # synthetic identity-guide convergence check (propagate + random_search together)
+python synthesis/pyramid.py     # level-size / NNF-upscale math checks
+python synthesis/uniformity.py  # occupancy-flattening check (expected: var ~40000 -> ~27000, peak 884 -> 723)
 
-# Full pipeline, end to end (takes ~25-30s at 540x960 with defaults):
+# Full pipeline, end to end (~25-30s at 540x960 with defaults) — this is also the real-image milestone test:
 python stylize.py -style examples/video/output_frames/000.png \
                   -guide examples/video/video_frames/000.jpg examples/video/video_frames/001.jpg \
                   -output examples/video/temp/001.png -extrapass3x3
 ```
 
+Testing gotcha (learned the hard way): any A/B comparison of two full syntheses (e.g. extrapass3x3 on vs off) must
+`torch.manual_seed(...)` identically before each run — otherwise the two runs are independent random syntheses
+whose natural variance swamps the smaller effect being measured.
+
 ## Architecture
 
 Original `ebsynth.cpp` `main()` is one long function; this rewrite splits it along its phases (line numbers refer to
-`../ebsynth/src/ebsynth.cpp` = `ebpynth/src/ebsynth.cpp`, byte-identical):
+`../ebsynth/src/ebsynth.cpp`):
 
 - **`arguments/parser.py`** replaces the `tryToParseArg` CLI loop (~lines 195–304). Custom `argparse.Action`s
   (`StyleAction`/`GuideAction`/`WeightAction`) reproduce the *cascading weight* rule — a bare `-weight` binds to the
@@ -146,26 +128,24 @@ Original `ebsynth.cpp` `main()` is one long function; this rewrite splits it alo
   RGBA lanes before re-slicing. Returns per-guide channel counts, which `plan_pyramid` needs for weight spreading.
 
 - **`utils/pyramid_plan.py`** replaces the tail-end scalar math (~lines 383–426). Auto level count uses float
-  scaling + int truncation to reproduce `pyramidLevelSize`'s `V2f→V2i` rounding exactly (an integer shift can be
-  off by one); explicit `-pyramidlevels` values are silently clamped to the derived max, like the original. Per-level
-  iteration arrays are one scalar replicated (the kernel API allows per-level values; the CLI never varies them).
-  Weight vectors: `style_weight/C_style` per style channel; each guide defaults to `1/numGuides` then spreads over
-  its own channels. All outputs are plain CPU-side Python lists/ints.
+  scaling + int truncation to reproduce `pyramidLevelSize`'s `V2f→V2i` rounding exactly; explicit `-pyramidlevels`
+  values are silently clamped to the derived max, like the original. Per-level iteration arrays are one scalar
+  replicated (the kernel API allows per-level values; the CLI never varies them). Weight vectors:
+  `style_weight/C_style` per style channel; each guide defaults to `1/numGuides` then spreads over its own
+  channels. All outputs are plain CPU-side Python lists/ints.
 
-- **`stylize.py`** — the top-level orchestrator (the README's staged plan builds toward it; note it was called
-  `pipeline.py` in very early drafts). Chains parse → load style → merge guides → plan pyramid → parity printout
-  (~lines 430–436) → `synthesis.run_pyramid()` (called directly, unpacking `config`/`plan` into its arguments) →
-  save, with a shape assert standing in for Task E's original "pre-allocate the output canvas" role (the engine is
-  pure-functional — every stage returns a new tensor rather than writing into one shared buffer — so there's no
-  literal buffer to pre-allocate into anymore).
+- **`stylize.py`** — the whole pipeline, written out sequentially: parse → load style → merge guides → plan
+  pyramid → parity printout (~lines 430–436) → coarse-to-fine pyramid loop with the match/vote loop inline
+  (replacing `ebsynthRunCuda` + the per-level body of ebsynth_cuda.cu's main loop, ~lines 828-1095) → optional
+  extrapass3x3 → shape assert → save. Section comments (阶段 0-5, 4a/4b/4c) mirror `README_zh.md`'s workflow
+  numbering. The engine is pure-functional — every step returns a new tensor rather than writing into one shared
+  buffer.
 
-- **`synthesis/`** — the pure-PyTorch PatchMatch engine, README Tasks F–J, described level by level above. Core
-  state throughout is the NNF: an integer tensor `(H_target, W_target, 2)` mapping each target pixel to a source
+- **`synthesis/`** — leaf building blocks only (no orchestration; the loops live in `stylize.py`). Core state
+  throughout is the NNF: an integer tensor `(H_target, W_target, 2)` mapping each target pixel to a source
   coordinate. The algorithm reference is `../ebsynth/src/ebsynth_cuda.cu` (per-level sizes derived internally at
   lines ~742–744; the 192-entry `dispatchEbsynth[24][8]` template table at ~1126 is why the channel limits exist).
-  `run_pyramid` (in `pyramid.py`) is the package's public entry point — there's no separate top-level wrapper
-  module; everything else is an internal building block importable individually for testing (as every module's
-  own `__main__` sandbox does).
+  Every module is importable individually for testing, as the `__main__` sandboxes do.
 
 Tensor convention throughout: images are `uint8`, shaped `(H, W, C)` (interleaved, not planar), on CUDA, kept
 `.contiguous()`. With no raw-pointer boundary left, contiguity is no longer a silent-corruption risk — the

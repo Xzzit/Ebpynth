@@ -13,9 +13,16 @@ EBSYNTH_MAX_GUIDE_CHANNELS = 24
 
 def _expand_channels(tensor: torch.Tensor, num_channels: int) -> torch.Tensor:
     """
-    Re-expands a channel-collapsed (H, W, C) guide tensor back up to num_channels,
-    replicating how the original packing loops always draw from the full RGBA buffer
-    (ebsynth.cpp lines ~347-381): lane order is R, then A if 2 channels, else G/B/A.
+    Re-expands a channel-collapsed guide tensor up to num_channels, replicating how
+    the original packing loops always draw from the full RGBA buffer (ebsynth.cpp
+    ~lines 347-381): lane order is R, then A if 2 channels, else G/B/A.
+
+    Args:
+        tensor: uint8 CUDA tensor, shape (H, W, C) with C in {1, 2, 3, 4}.
+        num_channels: target channel count, must be >= C.
+
+    Returns:
+        uint8 CUDA tensor, shape (H, W, num_channels).
     """
     c = tensor.shape[-1]
     if c == num_channels:

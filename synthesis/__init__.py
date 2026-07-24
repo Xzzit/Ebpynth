@@ -3,8 +3,7 @@ from .vote import gather_image, vote_image
 from .cost import build_cost_weights, build_combined_source, pad_target, patch_cost
 from .propagate import propagate
 from .random_search import random_search
-from .patchmatch import run_patchmatch
-from .pyramid import level_size, resize_image, upscale_nnf, run_pyramid
+from .pyramid import level_size, resize_image, upscale_nnf
 from .uniformity import Uniformity, compute_omega, ideal_omega
 
 __all__ = [
@@ -13,7 +12,6 @@ __all__ = [
     "build_cost_weights", "build_combined_source", "pad_target", "patch_cost",
     "propagate",
     "random_search",
-    "run_patchmatch",
-    "level_size", "resize_image", "upscale_nnf", "run_pyramid",
+    "level_size", "resize_image", "upscale_nnf",
     "Uniformity", "compute_omega", "ideal_omega",
 ]

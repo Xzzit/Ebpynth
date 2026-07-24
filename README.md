@@ -13,7 +13,7 @@ you can step through, inspect, and modify.
 
 ```
 Ebpynth/
-├── stylize.py                   # CLI entry point — wires every stage below into one pipeline
+├── stylize.py                   # CLI entry point — the whole pipeline, including the pyramid and match/vote loops, written out step by step
 │
 ├── arguments/
 │   └── parser.py                # Parses and validates CLI arguments
@@ -23,14 +23,13 @@ Ebpynth/
 │   ├── guide_merge.py            # Concatenates guide image pairs into feature tensors
 │   └── pyramid_plan.py           # Computes pyramid level count and per-level hyperparameters
 │
-├── synthesis/                    # The PatchMatch engine, pure PyTorch
+├── synthesis/                    # PatchMatch building blocks, called in order by stylize.py
 │   ├── nnf.py                    # Random Nearest-Neighbor Field (NNF) initialization
 │   ├── vote.py                   # Reconstructs an image from an NNF ("imaging")
 │   ├── cost.py                   # Weighted patch-distance (SSD) cost function
 │   ├── propagate.py              # Jump-flood neighbor propagation
 │   ├── random_search.py          # Randomized local search for better matches
-│   ├── patchmatch.py             # Single-resolution match/vote optimization loop
-│   ├── pyramid.py                # Coarse-to-fine driver + optional 3x3 refinement pass
+│   ├── pyramid.py                # Pyramid math: level sizes, image resizing, NNF upscaling
 │   └── uniformity.py             # Penalizes overused source patches
 │
 └── examples/video/               # Sample style/guide frames for testing
