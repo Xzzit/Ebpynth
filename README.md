@@ -32,7 +32,11 @@ Ebpynth/
 │   ├── pyramid.py                # Pyramid math: level sizes, image resizing, NNF upscaling
 │   └── uniformity.py             # Penalizes overused source patches
 │
-└── examples/video/               # Sample style/guide frames for testing
+└── examples/                     # Sample style/guide assets, one folder per use case
+    ├── frame/                    # Video frame stylization (a painted keyframe + raw frame pair)
+    ├── facestyle/                # Face portrait stylization (appearance/segmentation/position guides)
+    ├── texbynum/                 # Texture-by-numbers (a single segmentation-map guide)
+    └── stylit/                   # Illumination-guided 3D render stylization (multiple lighting-pass guides)
 ```
 
 ## Setup
@@ -45,13 +49,56 @@ Requires Python 3.9+, PyTorch (CUDA build), torchvision, and Pillow.
 python stylize.py -style <style_image> -guide <source_guide> <target_guide> [-guide ...] [options]
 ```
 
-Example — stylize frame 001 using frame 000's stylization as the style keyframe:
+Example 1 — video frame stylization: a hand-painted keyframe (`source_painting`) is transferred onto a new
+frame, guided by the raw frame pair it was painted from (`source_frame` → `target_frame`):
 
 ```bash
 python stylize.py \
-  -style examples/video/output_frames/000.png \
-  -guide examples/video/video_frames/000.jpg examples/video/video_frames/001.jpg \
-  -output result.png -extrapass3x3
+  -style examples/frame/source_painting.jpg \
+  -guide examples/frame/source_frame.jpg examples/frame/target_frame.jpg \
+  -output examples/frame/output.png \
+  -extrapass3x3
+```
+
+Example 2 — face portrait stylization (the "FaceStyle" use case from the original ebsynth): transfers a portrait
+painting's style onto a photo while preserving the subject's identity, using three facial-landmark-derived guides
+instead of raw pixels — `Gapp` (target's luminance matched to the painting, keeps identity), `Gseg` (soft face
+segmentation), and `Gpos` (a dense warp field mapping target pixels to their source correspondence):
+
+```bash
+python stylize.py \
+  -style examples/facestyle/source_painting.png \
+  -guide examples/facestyle/source_Gapp.png examples/facestyle/target_Gapp.png -weight 2.0 \
+  -guide examples/facestyle/source_Gseg.png examples/facestyle/target_Gseg.png -weight 1.5 \
+  -guide examples/facestyle/source_Gpos.png examples/facestyle/target_Gpos.png -weight 1.5 \
+  -output examples/facestyle/output.png
+```
+
+Example 3 — texture-by-numbers: a photo is resynthesized from a hand-painted target segmentation map, using a
+single guide pair (source segmentation → target segmentation):
+
+```bash
+python stylize.py \
+  -patchsize 3 -uniformity 1000 \
+  -style examples/texbynum/source_photo.png \
+  -guide examples/texbynum/source_segment.png examples/texbynum/target_segment.png \
+  -output examples/texbynum/output.png
+```
+
+Example 4 — StyLit: transfers a hand-painted, non-photorealistic shading style (here, an illuminated ball drawn in
+colored pencil) onto a 3D-rendered model, using several path-traced lighting passes as guides instead of raw pixel
+color — `fullgi` (full global illumination), `dirdif` (direct diffuse), `dirspc` (direct specular), and `indirb`
+(indirect bounce). The four guide weights sum to 2.0, the same 2:1 guide-to-style ratio as the original StyLit
+example (which used three guides at 0.66 each):
+
+```bash
+python stylize.py \
+  -style examples/stylit/source_style.png \
+  -guide examples/stylit/source_fullgi.png examples/stylit/target_fullgi.png -weight 0.5 \
+  -guide examples/stylit/source_dirdif.png examples/stylit/target_dirdif.png -weight 0.5 \
+  -guide examples/stylit/source_dirspc.png examples/stylit/target_dirspc.png -weight 0.5 \
+  -guide examples/stylit/source_indirb.png examples/stylit/target_indirb.png -weight 0.5 \
+  -output examples/stylit/output.png
 ```
 
 ### Arguments
