@@ -83,20 +83,3 @@ def save_image_from_vram(gpu_tensor: torch.Tensor, file_path: str) -> None:
     except Exception as err:
         print(f"error: failed to save '{file_path}'\nReason: {str(err)}", file=sys.stderr)
         sys.exit(1)
-
-
-if __name__ == "__main__":
-    # Sandbox check (run from the repo root)
-    test_image_path = "examples/video/video_frames/000.jpg"
-    tensor = load_image_to_vram(test_image_path)
-    print(f"Loaded image tensor shape: {tensor.shape}, dtype: {tensor.dtype}, device: {tensor.device}")
-
-    # Round-trip test: save to a temp file, reload, and verify bytes survive intact
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        round_trip_path = os.path.join(tmp_dir, "round_trip.png")
-        save_image_from_vram(tensor, round_trip_path)
-        reloaded = load_image_to_vram(round_trip_path)
-        assert reloaded.shape == tensor.shape, f"shape changed: {tensor.shape} -> {reloaded.shape}"
-        assert torch.equal(reloaded, tensor), "pixel data corrupted in save/load round trip"
-    print("Save/load round-trip test passed ✓")

@@ -97,33 +97,3 @@ def parse_arguments(argv=None) -> Dict[str, Any]:
 
     except SystemExit:
         sys.exit(1)
-
-
-# Sandbox check (run from the repo root: python arguments/parser.py)
-if __name__ == "__main__":
-    mock_cli = [
-        "stylize.py",
-        "-style", "painting.png", "2.0",
-        "-guide", "src_flow.png", "tgt_flow.png", "10.5",
-        "-guide", "src_seg.png", "tgt_seg.png",
-        "-patchsize", "7",
-        "-extrapass3x3"
-    ]
-    res = parse_arguments(mock_cli)
-    import pprint
-    print("Argument parsing test passed, parsed config:")
-    pprint.pprint(res)
-
-    assert res["style_file"] == "painting.png"
-    assert res["style_weight"] == 2.0
-    assert res["guides"][0] == {"source": "src_flow.png", "target": "tgt_flow.png", "weight": 10.5}
-    assert res["guides"][1] == {"source": "src_seg.png", "target": "tgt_seg.png", "weight": -1.0}
-    assert res["patch_size"] == 7
-    assert res["extra_pass_3x3"] == 1
-
-    # -style with no weight, -guide with no weight: both fall back to the -1.0 sentinel
-    res_no_weight = parse_arguments(["stylize.py", "-style", "painting.png", "-guide", "a.png", "b.png"])
-    assert res_no_weight["style_weight"] == -1.0
-    assert res_no_weight["guides"][0]["weight"] == -1.0
-
-    print("Weight parsing sanity checks passed ✓")

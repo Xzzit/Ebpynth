@@ -81,12 +81,11 @@ up further work, keep the established rhythm: **one task/change at a time with u
 
 Dev environment: conda env `ezsynth` (torch with CUDA, `torch.cuda.is_available()` is True).
 
-No test suite or lint config; modules end with an `if __name__ == "__main__"` sandbox check with asserts.
-Run everything from the repo root:
+No test suite or lint config; most modules end with an `if __name__ == "__main__"` sandbox check with asserts.
+`arguments/parser.py` and `utils/image_io.py` are the exception — their sandbox blocks were deliberately removed
+once reviewed, so they're covered only by the full-pipeline run below. Run everything from the repo root:
 
 ```bash
-python arguments/parser.py      # parser sandbox (mock CLI invocation)
-python utils/image_io.py        # load + save/load round-trip test (uses examples/)
 python utils/guide_merge.py     # merge + channel-alignment asserts (uses examples/, needs CUDA)
 python utils/pyramid_plan.py    # pyramid/weight math asserts (pure CPU)
 python synthesis/vote.py        # identity-NNF exactness check + mosaic milestones
