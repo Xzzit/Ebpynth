@@ -29,7 +29,7 @@ coarse-to-fine pyramid loop AND the per-level match/vote loop — is written out
 (as was `synthesis/patchmatch.py` entirely). `synthesis/` now holds only leaf building blocks. Do not reintroduce
 intermediate orchestration wrappers; new pipeline steps go inline into `stylize.py`.
 
-- **Prep/IO:** `arguments/parser.py` (CLI parsing with cascading `-weight`), `utils/image_io.py`
+- **Prep/IO:** `arguments/parser.py` (CLI parsing with inline `-style`/`-guide` weight), `utils/image_io.py`
   (`load_image_to_vram` + `save_image_from_vram`), `utils/guide_merge.py` (`merge_guides`), `utils/pyramid_plan.py`
   (`plan_pyramid`).
 - **Synthesis building blocks (`synthesis/`):**
@@ -109,9 +109,12 @@ whose natural variance swamps the smaller effect being measured.
 Original `ebsynth.cpp` `main()` is one long function; this rewrite splits it along its phases (line numbers refer to
 `../ebsynth/src/ebsynth.cpp`):
 
-- **`arguments/parser.py`** replaces the `tryToParseArg` CLI loop (~lines 195–304). Custom `argparse.Action`s
-  (`StyleAction`/`GuideAction`/`WeightAction`) reproduce the *cascading weight* rule — a bare `-weight` binds to the
-  immediately preceding `-style`/`-guide`, tracked via `namespace._last_added`. Returns a plain config dict.
+- **`arguments/parser.py`** replaces the `tryToParseArg` CLI loop (~lines 195–304). Deliberately diverges from the
+  original's CLI shape here: `-style <path> [weight]` and `-guide <source> <target> [weight]` take weight as an
+  inline optional trailing token (`nargs="+"`, length tells you whether it was given) instead of a separate
+  cascading `-weight` flag bound to whatever came before it — simpler to parse and read, no `Action` subclasses or
+  namespace state needed. Omitted weights are returned as a `-1.0` sentinel; `utils/pyramid_plan.py` resolves that
+  to the real default (style 1.0, guide 1/num_guides). Returns a plain config dict.
 
 - **`utils/image_io.py`** replaces `tryLoad` + `evalNumChannels` + output write (~lines 134–153, 310–321, 461).
   Loading permutes CHW→HWC and calls `.contiguous()` before `.cuda()` and after channel-slicing. Channel collapse

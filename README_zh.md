@@ -21,7 +21,7 @@ Ebpynth/
 ├── stylize.py                   # 总入口：从解析参数到保存图片的全部主流程按顺序写在这里，包括金字塔循环和 match/vote 循环
 │
 ├── arguments/
-│   └── parser.py                # 用 argparse 读 CLI 参数，复刻 -weight 的"级联绑定"语义
+│   └── parser.py                # 用 argparse 读 CLI 参数，权重作为 -style/-guide 的可选尾随参数
 │
 ├── utils/
 │   ├── image_io.py               # 图片 <-> 显存里的 (H, W, C) uint8 CUDA 张量，负责读写
@@ -56,7 +56,7 @@ Ebpynth/
 最基本的调用形式：
 
 ```bash
-python stylize.py -style <风格图> -guide <source导引图> <target导引图> [-guide ...] [其他可选参数]
+python stylize.py -style <风格图> [权重] -guide <source导引图> <target导引图> [权重] [-guide ...] [其他可选参数]
 ```
 
 真实示例——用第 000 帧的风格化结果作为 style，去风格化第 001 帧（视频逐帧风格化的典型用法）：
@@ -72,9 +72,8 @@ python stylize.py \
 
 | 参数 | 默认值 | 含义 |
 |---|---|---|
-| `-style <path>` | 必填 | 风格关键帧，输出图像的颜色全部来自这张图；guide 只决定"抄哪个位置"。 |
-| `-guide <source> <target>` | 至少一组 | `source` 与 style 图像素对齐，`target` 与目标输出像素对齐。可重复传多组（如颜色 + 边缘 + 光流）。 |
-| `-weight <value>` | style: `1.0`；guide: `1/组数` | 绑定到前一个 `-style`/`-guide`（级联语义），值越大在代价函数中占比越高。 |
+| `-style <path> [weight]` | path 必填，weight 默认 `1.0` | 风格关键帧，输出图像的颜色全部来自这张图；guide 只决定"抄哪个位置"。weight 是可选的尾随参数，值越大在代价函数中占比越高。 |
+| `-guide <source> <target> [weight]` | 至少一组，weight 默认 `1/组数` | `source` 与 style 图像素对齐，`target` 与目标输出像素对齐。weight 是可选的尾随参数。可重复传多组（如颜色 + 边缘 + 光流）。 |
 | `-output <path>` | `output.png` | 输出图像路径。 |
 | `-uniformity <value>` | `3500.0` | 均匀性惩罚力度，越大越抑制某个 source patch 被过度复用；0 为关闭。 |
 | `-patchsize <奇数, ≥3>` | `5` | 匹配用的正方形 patch 边长，越大越偏结构、越小越偏细节但易出噪点。 |
@@ -105,8 +104,9 @@ python stylize.py \
 ### 阶段 0：解析命令行参数 —— `arguments/parser.py`
 
 `argparse` 把 `-style`、`-guide`、`-patchsize` 等参数解析成字典 `config`，并做范围校验（如 patchsize
-必须是 ≥3 的奇数）。`-weight` 本身不带目标，靠自定义 `Action`（`StyleAction`/`GuideAction`/`WeightAction`）
-配合 `namespace._last_added` 绑定到紧邻的前一个 `-style`/`-guide`（级联语义）。
+必须是 ≥3 的奇数）。`-style`/`-guide` 都用 `nargs="+"` 接收变长 token：`-style` 是 `<path> [weight]`，
+`-guide` 是 `<source> <target> [weight]`——weight 是否传入靠 token 数量判断（2 个还是 1 个/3 个还是 2 个），
+省略时用 `-1.0` 作为"未设置"哨兵值，交给 `plan_pyramid` 解析成真正的默认值（style 1.0，guide 1/组数）。
 
 ### 阶段 1：把图像读进显存 —— `utils/image_io.py`
 

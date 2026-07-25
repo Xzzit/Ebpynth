@@ -3,85 +3,36 @@ import sys
 from typing import Dict, Any
 
 
-class EbSynthNamespace(argparse.Namespace):
-    """argparse.Namespace with the default config values and cascading-weight tracking state."""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.style_file = ""
-        self.style_weight = -1.0
-        self.output_file = "output.png"
-        self.guides = []
-        self.uniformity_weight = 3500.0
-        self.patch_size = 5
-        self.num_pyramid_levels = -1
-        self.num_search_vote_iters = 6
-        self.num_patch_match_iters = 4
-        self.stop_threshold = 5
-        self.extra_pass_3x3 = False
-        # Points at whichever -style/-guide token was parsed most recently, so a
-        # following bare -weight knows what it binds to: ("style",) or ("guide", index).
-        self._last_added = None
-
-
-class StyleAction(argparse.Action):
-    """Records -style and marks it as the current cascading-weight target."""
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        namespace.style_file = values
-        namespace.style_weight = -1.0
-        namespace._last_added = ("style",)
-
-
-class GuideAction(argparse.Action):
-    """Appends a {source, target, weight} guide entry and marks it as the cascading-weight target."""
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        guide_entry = {"source": values[0], "target": values[1], "weight": -1.0}
-        namespace.guides.append(guide_entry)
-        namespace._last_added = ("guide", len(namespace.guides) - 1)
-
-
-class WeightAction(argparse.Action):
-    """Applies a bare -weight to whichever -style/-guide immediately preceded it."""
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        if values < 0.0:
-            raise argparse.ArgumentError(self, "weights must be non-negative!")
-        if namespace._last_added is None:
-            raise argparse.ArgumentError(self, "at least one -style or -guide option must precede the -weight option!")
-
-        if namespace._last_added[0] == "style":
-            namespace.style_weight = values
-        elif namespace._last_added[0] == "guide":
-            idx = namespace._last_added[1]
-            namespace.guides[idx]["weight"] = values
-
-
 def parse_arguments(argv=None) -> Dict[str, Any]:
     """
     Parses CLI arguments into a plain config dict, replacing the original's tryToParseArg
-    loop (ebsynth.cpp ~lines 195-304). No tensors here — output is plain Python types.
+    loop (ebsynth.cpp ~lines 195-304). Weight is inline on -style/-guide (nargs="+", the
+    trailing token parsed as a float when present) instead of a separate cascading -weight
+    flag, so there's no parser state tracking "which flag was declared last." No tensors
+    here — output is plain Python types.
 
     Args:
         argv: full argv list including the program name at index 0 (e.g. sys.argv), or
               None to read sys.argv directly.
 
     Returns:
-        dict with keys: style_file (str), style_weight (float), output_file (str),
-        guides (list of {"source": str, "target": str, "weight": float}),
-        uniformity_weight (float), patch_size (int), num_pyramid_levels (int),
-        num_search_vote_iters (int), num_patch_match_iters (int), stop_threshold (int),
-        extra_pass_3x3 (0 or 1).
+        dict with keys: style_file (str), style_weight (float, -1.0 if unset),
+        output_file (str), guides (list of {"source": str, "target": str,
+        "weight": float}, -1.0 if unset), uniformity_weight (float), patch_size (int),
+        num_pyramid_levels (int), num_search_vote_iters (int), num_patch_match_iters (int),
+        stop_threshold (int), extra_pass_3x3 (0 or 1).
     """
     parser = argparse.ArgumentParser(
         description="Ebpynth: a pure PyTorch reimplementation of ebsynth",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    parser.add_argument("-style", type=str, action=StyleAction, help="Path to the style painting keyframe")
-    parser.add_argument("-guide", type=str, nargs=2, action=GuideAction, help="Paths to <source_guide> and <target_guide>")
-    parser.add_argument("-weight", type=float, action=WeightAction, help="Weight for the preceding -style/-guide")
+    parser.add_argument("-style", nargs="+", required=True, metavar=("PATH", "WEIGHT"),
+                        help="Path to the style painting keyframe, optionally followed by its weight (default 1.0)")
+    parser.add_argument("-guide", dest="guides", action="append", nargs="+", default=[],
+                        metavar=("SOURCE", "TARGET"),
+                        help="Source and target guide paths, optionally followed by this guide's weight "
+                             "(default 1/num_guides). Repeatable.")
 
     parser.add_argument("-output", type=str, default="output.png", dest="output_file", help="Output filename")
     parser.add_argument("-uniformity", type=float, default=3500.0, dest="uniformity_weight", help="Spatial uniformity scaling multiplier")
@@ -92,10 +43,30 @@ def parse_arguments(argv=None) -> Dict[str, Any]:
     parser.add_argument("-stopthreshold", type=int, default=5, dest="stop_threshold", help="Parsed for CLI compatibility only; unused by this engine")
     parser.add_argument("-extrapass3x3", action="store_true", dest="extra_pass_3x3", help="Apply a final 3x3-patch refinement pass")
 
-    custom_namespace = EbSynthNamespace()
     try:
         target_args = argv[1:] if argv is not None else sys.argv[1:]
-        args = parser.parse_args(target_args, namespace=custom_namespace)
+        args = parser.parse_args(target_args)
+
+        def parse_weight(token):
+            try:
+                weight = float(token)
+            except ValueError:
+                parser.error(f"'{token}' is not a valid weight!")
+            if weight < 0.0:
+                parser.error("weights must be non-negative!")
+            return weight
+
+        if len(args.style) not in (1, 2):
+            parser.error("-style takes <path> [weight]!")
+        style_file = args.style[0]
+        style_weight = parse_weight(args.style[1]) if len(args.style) == 2 else -1.0
+
+        guides = []
+        for tokens in args.guides:
+            if len(tokens) not in (2, 3):
+                parser.error("-guide takes <source> <target> [weight]!")
+            weight = parse_weight(tokens[2]) if len(tokens) == 3 else -1.0
+            guides.append({"source": tokens[0], "target": tokens[1], "weight": weight})
 
         if args.patch_size < 3:
             parser.error("patchsize is too small!")
@@ -110,10 +81,19 @@ def parse_arguments(argv=None) -> Dict[str, Any]:
         if args.stop_threshold < 0:
             parser.error("bad argument for -stopthreshold!")
 
-        config = vars(args)
-        config.pop("_last_added", None)
-        config["extra_pass_3x3"] = 1 if config["extra_pass_3x3"] else 0
-        return config
+        return {
+            "style_file": style_file,
+            "style_weight": style_weight,
+            "output_file": args.output_file,
+            "guides": guides,
+            "uniformity_weight": args.uniformity_weight,
+            "patch_size": args.patch_size,
+            "num_pyramid_levels": args.num_pyramid_levels,
+            "num_search_vote_iters": args.num_search_vote_iters,
+            "num_patch_match_iters": args.num_patch_match_iters,
+            "stop_threshold": args.stop_threshold,
+            "extra_pass_3x3": 1 if args.extra_pass_3x3 else 0,
+        }
 
     except SystemExit:
         sys.exit(1)
@@ -123,8 +103,8 @@ def parse_arguments(argv=None) -> Dict[str, Any]:
 if __name__ == "__main__":
     mock_cli = [
         "stylize.py",
-        "-style", "painting.png", "-weight", "2.0",
-        "-guide", "src_flow.png", "tgt_flow.png", "-weight", "10.5",
+        "-style", "painting.png", "2.0",
+        "-guide", "src_flow.png", "tgt_flow.png", "10.5",
         "-guide", "src_seg.png", "tgt_seg.png",
         "-patchsize", "7",
         "-extrapass3x3"
@@ -133,3 +113,17 @@ if __name__ == "__main__":
     import pprint
     print("Argument parsing test passed, parsed config:")
     pprint.pprint(res)
+
+    assert res["style_file"] == "painting.png"
+    assert res["style_weight"] == 2.0
+    assert res["guides"][0] == {"source": "src_flow.png", "target": "tgt_flow.png", "weight": 10.5}
+    assert res["guides"][1] == {"source": "src_seg.png", "target": "tgt_seg.png", "weight": -1.0}
+    assert res["patch_size"] == 7
+    assert res["extra_pass_3x3"] == 1
+
+    # -style with no weight, -guide with no weight: both fall back to the -1.0 sentinel
+    res_no_weight = parse_arguments(["stylize.py", "-style", "painting.png", "-guide", "a.png", "b.png"])
+    assert res_no_weight["style_weight"] == -1.0
+    assert res_no_weight["guides"][0]["weight"] == -1.0
+
+    print("Weight parsing sanity checks passed ✓")

@@ -46,7 +46,7 @@ Requires Python 3.9+, PyTorch (CUDA build), torchvision, and Pillow.
 ## Usage
 
 ```bash
-python stylize.py -style <style_image> -guide <source_guide> <target_guide> [-guide ...] [options]
+python stylize.py -style <style_image> [weight] -guide <source_guide> <target_guide> [weight] [-guide ...] [options]
 ```
 
 Example 1 — video frame stylization: a hand-painted keyframe (`source_painting`) is transferred onto a new
@@ -68,9 +68,9 @@ segmentation), and `Gpos` (a dense warp field mapping target pixels to their sou
 ```bash
 python stylize.py \
   -style examples/facestyle/source_painting.png \
-  -guide examples/facestyle/source_Gapp.png examples/facestyle/target_Gapp.png -weight 2.0 \
-  -guide examples/facestyle/source_Gseg.png examples/facestyle/target_Gseg.png -weight 1.5 \
-  -guide examples/facestyle/source_Gpos.png examples/facestyle/target_Gpos.png -weight 1.5 \
+  -guide examples/facestyle/source_Gapp.png examples/facestyle/target_Gapp.png 2.0 \
+  -guide examples/facestyle/source_Gseg.png examples/facestyle/target_Gseg.png 1.5 \
+  -guide examples/facestyle/source_Gpos.png examples/facestyle/target_Gpos.png 1.5 \
   -output examples/facestyle/output.png
 ```
 
@@ -94,10 +94,10 @@ example (which used three guides at 0.66 each):
 ```bash
 python stylize.py \
   -style examples/stylit/source_style.png \
-  -guide examples/stylit/source_fullgi.png examples/stylit/target_fullgi.png -weight 0.5 \
-  -guide examples/stylit/source_dirdif.png examples/stylit/target_dirdif.png -weight 0.5 \
-  -guide examples/stylit/source_dirspc.png examples/stylit/target_dirspc.png -weight 0.5 \
-  -guide examples/stylit/source_indirb.png examples/stylit/target_indirb.png -weight 0.5 \
+  -guide examples/stylit/source_fullgi.png examples/stylit/target_fullgi.png 0.5 \
+  -guide examples/stylit/source_dirdif.png examples/stylit/target_dirdif.png 0.5 \
+  -guide examples/stylit/source_dirspc.png examples/stylit/target_dirspc.png 0.5 \
+  -guide examples/stylit/source_indirb.png examples/stylit/target_indirb.png 0.5 \
   -output examples/stylit/output.png
 ```
 
@@ -105,9 +105,8 @@ python stylize.py \
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-style <path>` | required | Style keyframe. Its pixels are the only source of output color. |
-| `-guide <source> <target>` | at least one required | A guide pair: `source` is pixel-aligned with the style image, `target` is aligned with the desired output. Repeat for multiple guides (e.g. color + edges + optical flow). |
-| `-weight <value>` | style: `1.0`, guide: `1/N` | Sets the weight of the `-style`/`-guide` declared immediately before it. |
+| `-style <path> [weight]` | path required, weight `1.0` | Style keyframe; its pixels are the only source of output color. Optional trailing weight. |
+| `-guide <source> <target> [weight]` | at least one required, weight `1/N` | A guide pair: `source` is pixel-aligned with the style image, `target` is aligned with the desired output. Optional trailing weight. Repeat for multiple guides (e.g. color + edges + optical flow). |
 | `-output <path>` | `output.png` | Output image path. |
 | `-uniformity <value>` | `3500.0` | Penalty weight discouraging the same source patch from being overused. |
 | `-patchsize <odd int, >= 3>` | `5` | Side length of the square patch used for matching. |
