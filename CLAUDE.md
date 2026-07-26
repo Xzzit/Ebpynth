@@ -155,48 +155,129 @@ unused by design; `-stopthreshold` is parsed for CLI compatibility only.
 
 ## Performance
 
-Measured on the `frame` example (960x540, 1 RGB guide, defaults + `-extrapass3x3`), RTX 5070 Ti, **25.5s total**,
-via CUDA-synchronized wall-clock wrappers:
+Profiled on the `frame` example (960x540, 1 RGB guide, defaults + `-extrapass3x3`), RTX 5070 Ti, via
+CUDA-synchronized wall-clock wrappers. Two optimizations have landed (see **Done** below); call counts are
+unchanged by them, so the before/after columns are directly comparable:
 
-| component | calls | seconds | % total |
-|---|---|---|---|
-| `propagate` *(inclusive)* | 168 | 16.02 | 62.8% |
-| `random_search` *(inclusive)* | 168 | 8.95 | 35.1% |
-| `patch_cost` *(leaf)* | 3210 | 8.67 | 34.0% |
-| `Uniformity.score` *(leaf)* | 5328 | 8.53 | 33.5% |
-| `Uniformity.update` *(leaf)* | 2664 | 6.94 | 27.2% |
-| `vote_image` | 49 | 0.14 | 0.5% |
-| `compute_omega`, `pad_target` | 6 / 42 | ~0.02 | ~0.1% |
+| leaf component | calls | before | after | % of current total |
+|---|---|---|---|---|
+| `patch_cost` | 3210 | 8.67 s | **5.18 s** | 62.4% |
+| `Uniformity.update` | 2664 | 6.94 s | **1.50 s** | 18.0% |
+| `Uniformity.score` | 5328 | 8.53 s | **0.45 s** | 5.4% |
+| `vote_image` | 49 | 0.14 s | 0.12 s | 1.4% |
+| `compute_omega`, `pad_target` | 6 / 42 | ~0.02 s | ~0.03 s | 0.3% |
+| **TOTAL** | | **25.5 s** | **8.30 s** | 3.07x |
 
-Leaf rows sum to ~98%. **Everything outside the candidate-evaluation inner loop is noise** — voting, resizing,
-I/O, and pyramid planning are collectively under 1%. Optimize the inner loop or don't bother.
+**Everything outside the candidate-evaluation inner loop is noise** — voting, resizing, I/O, and pyramid planning
+are collectively under 2%. Optimize the inner loop or don't bother. `patch_cost` now dominates at 62%, and since
+its per-call cost has already been cut, **the remaining lever is calling it fewer than 3210 times**, not making
+each call faster.
 
 **Work model.** Per pyramid level: `searchvoteiters` (6) × [1 full-field `patch_cost` + `patchmatchiters` (4) ×
 (12 propagate candidates + ~log₂(max_src_dim/2) random-search candidates)] + 1 `vote_image`. Propagate's 12 =
-3 jump radii × 4 directions. Each *candidate evaluation* costs, in full-field passes of `patch_size²` gathers:
-1 × `patch_cost` (C channels), plus with uniformity on 2 × `score` (1 channel) and 2 × `patch_size²` scatter_adds
-in `update`. That's why **uniformity is ~61% of runtime while contributing no cost-function information** — it is
-the single biggest lever.
+3 jump radii × 4 directions. Every candidate evaluation is one full-field `patch_cost`; with uniformity on it also
+costs 2 × `score` and 1 × `update`.
 
-Concrete leads, roughly by expected payoff (**none of these have been implemented or validated — measure first**):
+### The binding constraint: op dispatch, not bandwidth
 
-1. **`Uniformity.score(best_cost, best_nnf)` is recomputed from scratch for every candidate**, in both
-   [propagate.py:72](synthesis/propagate.py:72) and [random_search.py:49](synthesis/random_search.py:49), even
-   though it's the score of a field that only changes on acceptance. Half of all 5328 `score` calls recompute a
-   value that could be carried forward. Careful: the incumbent's score genuinely *does* shift when `update`
-   mutates Omega, so this needs thought, not a naive cache.
-2. **`patch_cost` re-materializes `combined_source.reshape(-1, channels).float()` on every one of its 3210
-   calls** ([cost.py:84](synthesis/cost.py:84)), even though `combined_source` is constant for a whole pyramid
-   level. Hoisting the float cast to level scope is nearly free to do.
-3. **Kernel-launch overhead is likely a large share.** `patch_cost` issues ~`patch_size²` × several ops ≈ 150
-   launches per call; across the run that's on the order of 10⁵–10⁶ tiny launches. `torch.compile` on the leaf
-   functions, or restructuring the `(dy, dx)` loop into a batched/unfolded form, targets this directly.
-4. **Batching propagate's 4 directions into one `patch_cost` call** would cut launches 4x — but it **changes
-   semantics**: all four candidates would be scored against the same starting incumbent instead of cascading.
-   Probably acceptable (PatchMatch is stochastic anyway) but it is a real behavioral change, so gate it behind a
-   decision with the user and A/B it under a fixed seed.
-5. **Precision.** Everything is float32. Costs are sums of squared uint8 diffs; fp16/bf16 accumulation may be
-   viable and would halve memory traffic on a bandwidth-bound workload.
+Two measurements pin this down, and they should steer every optimization decision here:
+
+- **CPU submit time ≈ total wall time** for all three hot functions (`patch_cost` 3.11 / 3.75 ms,
+  `Uniformity.score` 1.37 / 1.35 ms, `Uniformity.update` 2.64 / 2.65 ms at 540x960). The GPU is idling while
+  Python and the PyTorch dispatcher issue work.
+- **`patch_cost` costs the same regardless of data size**: 2.27 ms at 16x30 versus 3.86 ms at 540x960 — a 1080x
+  difference in pixels for 1.7x the time. That flat ~2.2 ms floor is pure per-op overhead. Consequence: coarse
+  pyramid levels are *not* cheap. Levels 0–4 hold 25% of the pixels but burn ~75% of pyramid time.
+
+So the lever is **fewer ops per offset**, not fewer bytes. Two corollaries, both verified the hard way:
+
+- **`torch.compile` is unavailable in this environment** — no Triton on Windows (`Cannot find a working triton
+  installation`). Would need the third-party `triton-windows` package; not installed, not a decision made yet.
+- **Batching the `patch_size²` offsets into one gather is a large net LOSS.** Tried both a full
+  `(H·W, patch_size², C)` unfold (0.36x on frame — 1.5 GB peak, 8.3 GB on stylit) and a per-row variant (0.61x).
+  Streaming the loop keeps the working set tiny; batching trades cheap dispatches for expensive memory traffic.
+  Don't retry this.
+
+### Done
+
+Both landed changes are pure op-count reductions with no algorithmic change. Cumulative, fixed seed:
+frame 23.4s → **8.0s** (2.92x), texbynum 9.6s → **3.2s** (3.02x), stylit 45.4s → **18.1s** (2.52x).
+
+**1. √weight folding in `patch_cost`** (see `build_channel_scales`): since Σ w·(t−s)² ≡ Σ (√w·t − √w·s)², scaling
+both feature tensors once per level removes the per-offset weight multiply. Bundled with hoisting the flat base
+index and the uint8→float32 cast out of the loop, and making `pad_target`'s output contiguous. ~13 ops per
+offset → ~6. Gains scale with channel count and patch size (stylit's C=15 benefited most; texbynum's patch_size 3
+means only 9 offsets, so barely at all).
+
+**2. Box-filtering Omega in `Uniformity`** (see `_box_sum`) — the bigger win, 19x on `score`. The old
+`_patch_omega_sum` gathered `patch_size²` times to sum Omega over each candidate's window, but that sum depends
+only on the window's *center*, not on which target pixel asked: it is a box filter over Omega, computable for all
+source positions in one `avg_pool2d(divisor_override=1)`, after which each target pixel needs a single gather.
+Cached and invalidated by `update`, so the two `score` calls within one propagate direction share one filter pass.
+Plus: `update`'s `-old`/`+new` scatters fused into one call over a pre-built concatenated index, and
+`weight / patch_size² / ideal` collapsed into one constant.
+
+Worth internalising as the general pattern here: **an inner loop indexed by patch offset is often a convolution in
+disguise.** `compute_omega` and `vote_image` have the same shape, though both are already off the critical path.
+
+Quality is unchanged but output is **not** bit-identical: the ~2e-07 relative perturbation flips a few
+`cand_cost < best_cost` comparisons, which PatchMatch amplifies chaotically into a visibly different-but-equivalent
+NNF (PSNR 29–38 dB against baseline). Verified by final converged mean cost — frame +0.16%, texbynum +0.57%,
+stylit −0.16%, i.e. within noise and random in direction. **When judging a change here, compare converged cost,
+not pixels.** The run-to-run noise floor is genuinely zero (same code + same seed reproduces bit-exact,
+`scatter_add_` notwithstanding), so any pixel difference at all means the change altered the search trajectory.
+
+### Tested and rejected: cutting iterations
+
+**There are no wasted iterations to reclaim.** Both ways of running fewer search/vote iterations were measured
+against final converged cost, fixed seed, and both just slide along a quality/speed trade-off curve rather than
+buying efficiency. Neither is an optimization; do not re-litigate this without new evidence.
+
+Per-level convergence does decay steeply (each level's 2nd iteration takes −20%~−34%, iterations 5–7 only 1–3%
+each), which makes the late iterations *look* skippable. They are not: their small per-level gains compound
+through every finer level above them.
+
+Fixed schedules, `searchvoteiters` per level — note the two examples **disagree about which end is expendable**,
+so there is no portable rule here:
+
+| schedule | frame | stylit |
+|---|---|---|
+| `[3,3,3,3,6,6]` cut coarse | 1.21x / **+22.9%** cost | 1.21x / +1.6% cost |
+| `[6,6,6,6,3,3]` cut fine | 1.35x / +7.8% cost | 1.73x / **+4.2%** cost |
+| `[2,3,4,5,6,6]` ramp | 1.28x / +26.9% cost | 1.18x / **+0.6%** cost |
+
+Adaptive early-stop (leave a level when the relative cost drop falls below a tolerance) does not escape the curve
+either — on frame, tol=3% gives 1.32x for +7.9%, essentially the same trade as the best fixed schedule's
+1.35x for +7.8%:
+
+| tolerance | frame | stylit |
+|---|---|---|
+| 1% | 1.05x / +0.7% | 1.41x / +2.1% |
+| 2% | 1.12x / +2.6% | 1.80x / +3.9% |
+| 3% | 1.32x / +7.9% | 1.93x / +4.7% |
+
+Early-stop is still defensible as a **user-facing quality knob** (stylit at 1.41x for +2.1% is a good deal if the
+user wants it) — but that would be a new CLI feature, not a speedup, and it is not implemented.
+
+### Remaining leads
+
+`patch_cost` is 62% of runtime across 3210 calls, and per-call cost is already reduced. Since the call count
+cannot be cut without paying in quality (above), what is left is doing **more work per call**:
+
+1. **Batch propagate's 4 directions and random_search's radii into one `patch_cost`.** Stack the candidate NNFs
+   into a leading dimension so one call scores 4 (or ~7) candidates. Dispatch count drops ~4x and ~7x while the
+   search itself is unchanged — the one lead that does not trade away quality. Rough ceiling: propagate is ~39% of
+   total and random_search ~22%, so plausibly 1.5–2x. Two caveats: it **changes semantics** (candidates get scored
+   against the same incumbent instead of cascading, and `Uniformity.update` must then resolve one winner per pass
+   rather than updating per direction), and the memory-traffic finding above means the batch factor must stay
+   small — 4x is fine at ~50 MB/offset on frame, 25x was catastrophic. A/B under fixed seed.
+2. **`Uniformity.update` still scatters over the whole field** (1.50 s, 18%) even though late in a level only a few
+   percent of pixels changed; the rest are `delta = 0` atomic adds that still cost traffic and contention.
+   Compressing to changed pixels via `nonzero` would cut the work but introduces a device→host sync — measure
+   before committing, a stall may cost more than it saves in a dispatch-bound loop.
+
+**Not worth doing:** fp16/bf16, int32 indices, or anything else that trades ops for bytes. Effective bandwidth is
+nowhere near the 5070 Ti's ~896 GB/s ceiling; the workload is dispatch-bound.
 
 When profiling: `synthesis/__init__.py` re-exports `propagate` and `random_search` as *functions*, shadowing the
 same-named submodules — `import synthesis.propagate as m` silently hands you the function. Use

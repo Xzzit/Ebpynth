@@ -6,7 +6,7 @@ except ImportError:
     from cost import patch_cost
 
 
-def propagate(nnf, cost, combined_source, combined_target_padded, weights, patch_size, uniformity=None):
+def propagate(nnf, cost, combined_source, combined_target_padded, patch_size, uniformity=None):
     """
     Jump-flood propagation, replacing krnlPropagationPass (ebsynth_cuda.cu ~line 187).
     The original runs on a serial scanline — each pixel reads a neighbor that was
@@ -28,9 +28,8 @@ def propagate(nnf, cost, combined_source, combined_target_padded, weights, patch
     Args:
         nnf: int64 CUDA tensor, shape (H_target, W_target, 2), (y, x) source coords.
         cost: float32 CUDA tensor, shape (H_target, W_target) — nnf's current cost.
-        combined_source: uint8 CUDA tensor, shape (H_source, W_source, C).
+        combined_source: float32 CUDA tensor, shape (H_source, W_source, C), √w-scaled.
         combined_target_padded: float32 CUDA tensor, shape (H_target+2r, W_target+2r, C).
-        weights: float32 CUDA tensor, shape (C,).
         patch_size: odd int, side length of the square patch.
         uniformity: optional Uniformity instance; None disables the occupancy penalty.
 
@@ -63,7 +62,7 @@ def propagate(nnf, cost, combined_source, combined_target_padded, weights, patch
                 torch.clamp(cand_x, r_patch, src_w - 1 - r_patch),
             ], dim=-1)
 
-            cand_cost = patch_cost(cand_nnf, combined_source, combined_target_padded, weights, patch_size)
+            cand_cost = patch_cost(cand_nnf, combined_source, combined_target_padded, patch_size)
             cand_cost = torch.where(valid, cand_cost, torch.full_like(cand_cost, float("inf")))
 
             if uniformity is None:
@@ -88,7 +87,7 @@ if __name__ == "__main__":
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sys.path.insert(0, repo_root)
 
-    from synthesis.cost import build_cost_weights, build_combined_source, pad_target
+    from synthesis.cost import build_channel_scales, build_combined_source, pad_target
     from synthesis.nnf import init_random_nnf
     from synthesis.random_search import random_search
 
@@ -104,15 +103,15 @@ if __name__ == "__main__":
     noise_guide = torch.randint(0, 256, (size, size, 3), dtype=torch.uint8, device="cuda")
 
     nnf = init_random_nnf(size, size, size, size, patch_size)
-    weights = build_cost_weights([0.0, 0.0, 0.0], [1.0 / 3, 1.0 / 3, 1.0 / 3])
-    combined_source = build_combined_source(noise_style, noise_guide)
-    combined_target_padded = pad_target(torch.cat([noise_style, noise_guide], dim=-1), patch_size)
+    scales = build_channel_scales([0.0, 0.0, 0.0], [1.0 / 3, 1.0 / 3, 1.0 / 3])
+    combined_source = build_combined_source(noise_style, noise_guide, scales)
+    combined_target_padded = pad_target(torch.cat([noise_style, noise_guide], dim=-1), patch_size, scales)
 
-    cost = patch_cost(nnf, combined_source, combined_target_padded, weights, patch_size)
+    cost = patch_cost(nnf, combined_source, combined_target_padded, patch_size)
     initial_cost = cost.mean().item()
     for _ in range(20):
-        nnf, cost = propagate(nnf, cost, combined_source, combined_target_padded, weights, patch_size)
-        nnf, cost = random_search(nnf, cost, combined_source, combined_target_padded, weights, patch_size)
+        nnf, cost = propagate(nnf, cost, combined_source, combined_target_padded, patch_size)
+        nnf, cost = random_search(nnf, cost, combined_source, combined_target_padded, patch_size)
     final_cost = cost.mean().item()
 
     print(f"Synthetic identity-guide test: mean cost {initial_cost:.1f} -> {final_cost:.1f}")

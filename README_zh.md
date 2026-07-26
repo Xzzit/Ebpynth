@@ -205,6 +205,18 @@ cost = Σ_channel  weight[c] · (target_patch[c] - source_patch[c])²
 指向）。target 侧用 `F.pad(mode="replicate")` 填充 `r` 圈以支持静态切片；source 侧因 NNF 边界不变量
 无需填充。
 
+**实现上的一个恒等变形（性能相关）：** 上式等价于
+
+```python
+cost = Σ_channel  (√weight[c]·target_patch[c] - √weight[c]·source_patch[c])²
+```
+
+即把 `√weight` 预先乘进两侧特征张量（`build_channel_scales` 算出 √w，`build_combined_source` 和
+`pad_target` 各乘一次，每层金字塔只做一次），加权 SSD 就退化成普通 SSD，`patch_cost` 最内层
+`patch_size²` 次循环里就不再需要乘权重了。这个循环是整个引擎最热的代码，而瓶颈是**算子调度开销而非
+显存带宽**（见下方"设计取舍"），所以从中删掉算子是真正省时间的手段。同理，展平索引基址和
+uint8→float32 转换也都提到了循环外。
+
 > ⚠️ 边界 `patch_size//2` 圈像素代价无法归零——填充内容在 source 里没有真实对应，这是 patch 类算法
 > 的固有边界伪影，非 bug。自测中"内部恢复率"与"全图均值代价"分开断言，避免被这层伪影误导。
 
@@ -232,6 +244,17 @@ cost = Σ_channel  weight[c] · (target_patch[c] - source_patch[c])²
   被接受后，把占用从旧位置转移到新位置。
 - Omega 生命周期为一个金字塔层：层内所有 vote/patchmatch 迭代累积共用，换层时重新统计。
 
+**这里藏着一个"卷积伪装"（值得单独理解）：** 打分需要的是"以 `nnf[q]` 为中心的窗口内 Omega 之和"。
+朴素写法是每个候选做 `patch_size²` 次 gather 累加——最初的实现正是如此。但这个和**只取决于窗口中心
+在哪，与是哪个 target 像素在问无关**，所以它本质上是对 Omega 做一次 box filter：用一次
+`avg_pool2d(..., divisor_override=1)` 就能把**所有** source 位置的窗口和一次算完，之后每个 target
+像素只需 gather 一次。`patch_size²` 次 gather 因此塌缩成"一次池化 + 一次 gather"，`score` 快了约
+19 倍。结果缓存在实例上，`update` 改动 Omega 时失效——同一个传播方向内，候选和现任是拿同一份 Omega
+打分的，可以共用一次池化。
+
+> 💡 一般化的经验：**以 patch 偏移为索引的内层循环，往往是伪装的卷积。** `compute_omega` 和
+> `vote_image` 是同样的形状，只是它们已不在关键路径上。
+
 > ⚠️ `-stopthreshold` 对应原版的"跳过已收敛像素"优化（mask/dilate），是 CUDA 单线程模型下的性能
 > 手段。全向量化实现没有可省的逐像素分支，重算已收敛像素也无害（只在严格更优时才替换），因此故意
 > 不实现，仅为兼容 CLI 保留参数。
@@ -253,7 +276,16 @@ cost = Σ_channel  weight[c] · (target_patch[c] - source_patch[c])²
 ## 设计取舍小结
 
 - 放弃 CUDA 桥接方案（原计划 pybind11 调用原版内核），改为纯 PyTorch 重写：零编译、可单步调试，代价
-  是速度慢一个数量级（仍是 GPU 计算）。
+  是速度显著慢于原生内核（仍是 GPU 计算）。
+- **性能瓶颈是算子调度开销，不是显存带宽。** 这一点反直觉但可测量：热点函数的"CPU 提交耗时"几乎等于
+  "总耗时"（GPU 在等 CPU 喂指令）；而且 `patch_cost` 在 16×30 上要 2.27 ms、在 540×960 上也只要
+  3.86 ms——像素数差 1080 倍，耗时只差 1.7 倍。那个雷打不动的固定开销来自 `patch_size²` 次 Python
+  循环里的几百个张量算子。由此推出两条实践原则：**减少算子数量有效**（√w 预乘、Omega 的 box filter
+  都属此类，合计提速约 3 倍）；**用更多访存换更少算子无效**——把 `patch_size²` 个偏移一次性批量成
+  `(H·W, patch_size², C)` 张量试过，反而慢 1.6~2.8 倍，且显存峰值飙到数 GB。
+- 迭代次数与质量是线性交换，**没有可以白拿的"浪费迭代"**。减少粗层或细层的 `searchvoteiters`、以及
+  按收敛率自适应早停，三种方案实测都只是在同一条质量/速度权衡曲线上滑动，且哪一端可省因图而异
+  （frame 与 stylit 结论相反）。故未改动默认迭代调度。
 - 主循环内联在 `stylize.py`：金字塔循环和 match/vote 循环直接按顺序写在入口文件里，`synthesis/` 只留
   积木函数。曾经存在的 `run_pyramid`/`run_patchmatch` 包装层已删除，为的是"看一个文件就能看清数据
   被一步步处理的全过程"。

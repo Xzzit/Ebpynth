@@ -5,7 +5,7 @@ import torch
 from arguments import parse_arguments
 from utils import load_image_to_vram, save_image_from_vram, merge_guides, plan_pyramid
 from synthesis import (
-    Uniformity, build_combined_source, build_cost_weights, init_random_nnf,
+    Uniformity, build_channel_scales, build_combined_source, init_random_nnf,
     level_size, pad_target, patch_cost, propagate, random_search, resize_image,
     upscale_nnf, vote_image,
 )
@@ -30,7 +30,9 @@ def main():
     plan = plan_pyramid(config, source_style.shape, target_guides.shape, guide_channels)
     num_levels = plan["num_pyramid_levels"]
     patch_size = config["patch_size"]
-    weights = build_cost_weights(plan["style_weights"], plan["guide_weights"])
+    # √weight per channel — folded into both feature tensors so the patch-cost hot
+    # loop is a plain SSD with no weight multiply (see synthesis/cost.py)
+    scales = build_channel_scales(plan["style_weights"], plan["guide_weights"])
 
     # Parity printout, matching the original CLI output (ebsynth.cpp ~430-436)
     print(f"uniformity: {config['uniformity_weight']:.0f}")
@@ -61,7 +63,7 @@ def main():
         # 4c. PatchMatch for this level: search-vote outer loop x patch-match inner
         # loop. combined_source is built once (constant within the level); the Omega
         # occupancy table (if uniformity is on) lives for the whole level too.
-        combined_source = build_combined_source(lvl_source_style, lvl_source_guides)
+        combined_source = build_combined_source(lvl_source_style, lvl_source_guides, scales)
         target_style = vote_image(nnf, lvl_source_style, patch_size)
         uniformity = None
         if config["uniformity_weight"] > 0:
@@ -70,13 +72,13 @@ def main():
 
         for _ in range(plan["search_vote_iters_per_level"][level]):
             combined_target = torch.cat([target_style, lvl_target_guides], dim=-1)
-            combined_target_padded = pad_target(combined_target, patch_size)
-            cost = patch_cost(nnf, combined_source, combined_target_padded, weights, patch_size)
+            combined_target_padded = pad_target(combined_target, patch_size, scales)
+            cost = patch_cost(nnf, combined_source, combined_target_padded, patch_size)
             for _ in range(plan["patch_match_iters_per_level"][level]):
                 nnf, cost = propagate(nnf, cost, combined_source, combined_target_padded,
-                                      weights, patch_size, uniformity)
+                                      patch_size, uniformity)
                 nnf, cost = random_search(nnf, cost, combined_source, combined_target_padded,
-                                          weights, patch_size, uniformity)
+                                          patch_size, uniformity)
             target_style = vote_image(nnf, lvl_source_style, patch_size)
 
     # Stage 4.9 (optional): extrapass3x3 refinement pass. Re-runs the same match/vote
@@ -84,14 +86,14 @@ def main():
     # off, replacing the original's re-entry into its own finest level
     # (ebsynth_cuda.cu ~1089-1095).
     if config["extra_pass_3x3"]:
-        combined_source = build_combined_source(source_style, source_guides)
+        combined_source = build_combined_source(source_style, source_guides, scales)
         target_style = vote_image(nnf, source_style, 3)
         for _ in range(plan["search_vote_iters_per_level"][-1]):
-            combined_target_padded = pad_target(torch.cat([target_style, target_guides], dim=-1), 3)
-            cost = patch_cost(nnf, combined_source, combined_target_padded, weights, 3)
+            combined_target_padded = pad_target(torch.cat([target_style, target_guides], dim=-1), 3, scales)
+            cost = patch_cost(nnf, combined_source, combined_target_padded, 3)
             for _ in range(plan["patch_match_iters_per_level"][-1]):
-                nnf, cost = propagate(nnf, cost, combined_source, combined_target_padded, weights, 3)
-                nnf, cost = random_search(nnf, cost, combined_source, combined_target_padded, weights, 3)
+                nnf, cost = propagate(nnf, cost, combined_source, combined_target_padded, 3)
+                nnf, cost = random_search(nnf, cost, combined_source, combined_target_padded, 3)
             target_style = vote_image(nnf, source_style, 3)
 
     # Stage 5: save the output image

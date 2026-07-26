@@ -6,7 +6,7 @@ except ImportError:
     from cost import patch_cost
 
 
-def random_search(nnf, cost, combined_source, combined_target_padded, weights, patch_size, uniformity=None):
+def random_search(nnf, cost, combined_source, combined_target_padded, patch_size, uniformity=None):
     """
     Replaces the growing-radius trial loop around krnlRandomSearchPass
     (ebsynth_cuda.cu ~line 355): for r = 1, 2, 4, 8, ... (doubling until half the
@@ -18,9 +18,8 @@ def random_search(nnf, cost, combined_source, combined_target_padded, weights, p
     Args:
         nnf: int64 CUDA tensor, shape (H_target, W_target, 2), (y, x) source coords.
         cost: float32 CUDA tensor, shape (H_target, W_target) — nnf's current cost.
-        combined_source: uint8 CUDA tensor, shape (H_source, W_source, C).
+        combined_source: float32 CUDA tensor, shape (H_source, W_source, C), √w-scaled.
         combined_target_padded: float32 CUDA tensor, shape (H_target+2r, W_target+2r, C).
-        weights: float32 CUDA tensor, shape (C,).
         patch_size: odd int, side length of the square patch.
         uniformity: optional Uniformity instance; None disables the occupancy penalty.
 
@@ -41,7 +40,7 @@ def random_search(nnf, cost, combined_source, combined_target_padded, weights, p
         cand_x = torch.clamp(nnf[..., 1] + offset_x, r_patch, src_w - 1 - r_patch)
         cand_nnf = torch.stack([cand_y, cand_x], dim=-1)
 
-        cand_cost = patch_cost(cand_nnf, combined_source, combined_target_padded, weights, patch_size)
+        cand_cost = patch_cost(cand_nnf, combined_source, combined_target_padded, patch_size)
 
         if uniformity is None:
             improved = cand_cost < cost
