@@ -3,26 +3,127 @@
 [简体中文](./README_zh.md) | English
 
 A pure Python + PyTorch reimplementation of [ebsynth](https://github.com/jamriska/ebsynth), the example-based
-image synthesis tool built on a PatchMatch-style algorithm. The original ships as a C++/CUDA binary; this project
-rewrites the entire pipeline — argument parsing, image I/O, guide merging, and the PatchMatch synthesis engine
-itself — as readable, debuggable PyTorch tensor code. No C++/CUDA is compiled or required. The trade-off is speed
-(roughly an order of magnitude slower than the native kernel) for clarity: every stage is a plain tensor operation
-you can step through, inspect, and modify.
+image synthesis tool (PatchMatch + coarse-to-fine pyramid + patch voting). Nothing is compiled — every stage is
+plain tensor code you can step through and modify, at roughly an order of magnitude the native kernel's runtime.
 
-## Dependencies
+## Install
 
-Tested With:
+Tested on Windows 11 and Ubuntu 26.04, Python 3.10, PyTorch 2.13.0 (CUDA 13.2), RTX 5070 Ti.
+**A CUDA GPU is required** — there is no CPU fallback.
 
-* Windows 11 & Ubuntu 26.04 (Reconmended)
-* Python 3.10
-* Pytorch 2.13.0 (cuda 13.2)
-* 5070 Ti GPU
-
-```
+```bash
 conda create -n ebpynth python=3.10
 conda activate ebpynth
 pip install -r requirements.txt
 ```
+
+## Usage
+
+```bash
+python stylize.py -style <style_image> [weight] -guide <source_guide> <target_guide> [weight] [-guide ...] [options]
+```
+
+One style image, plus at least one guide **pair**. The source guide is pixel-aligned with the style image; the
+target guide is aligned with the output you want. Weights are optional trailing tokens on `-style` and `-guide`.
+
+## Examples
+
+Four self-contained use cases live in `examples/`. Every grid below reads **left to right: guides, then style**,
+and **top to bottom: source, then target** — so the bottom-right cell is the synthesized result. Where an example
+has several guides they sit side by side in one cell, in the order named in the column header. Each command
+writes exactly the `output.png` shown, so you can reproduce any of them verbatim.
+
+### 1. Video frame
+
+A hand-painted keyframe transferred onto a new frame, guided by the raw frame pair it was painted from.
+
+```bash
+python stylize.py \
+  -style examples/frame/source_painting.jpg 0.5 \
+  -guide examples/frame/source_frame.jpg examples/frame/target_frame.jpg \
+  -output examples/frame/output.png \
+  -extrapass3x3
+```
+
+|  | Guide — `frame` | Style |
+|:--:|:--:|:--:|
+| **Source** | <img src="examples/frame/source_frame.jpg" alt="source frame" width="390"> | <img src="examples/frame/source_painting.jpg" alt="source painting" width="390"> |
+| **Target** | <img src="examples/frame/target_frame.jpg" alt="target frame" width="390"> | <a href="examples/frame/output.png"><img src="examples/frame/output.png" alt="synthesized frame" width="390"></a> |
+
+### 2. Face portrait
+
+A portrait painting's style transferred onto a photo while preserving the subject's identity, using three
+facial-landmark-derived guides instead of raw pixels: `Gapp` (target luminance matched to the painting),
+`Gseg` (soft face segmentation), `Gpos` (dense warp field mapping target pixels to their source correspondence).
+
+```bash
+python stylize.py \
+  -style examples/facestyle/source_painting.png \
+  -guide examples/facestyle/source_Gapp.png examples/facestyle/target_Gapp.png 2.0 \
+  -guide examples/facestyle/source_Gseg.png examples/facestyle/target_Gseg.png 1.5 \
+  -guide examples/facestyle/source_Gpos.png examples/facestyle/target_Gpos.png 1.5 \
+  -output examples/facestyle/output.png
+```
+
+|  | Guides — `Gapp`, `Gseg`, `Gpos` | Style |
+|:--:|:--:|:--:|
+| **Source** | <img src="examples/facestyle/source_Gapp.png" alt="source Gapp" width="150"> <img src="examples/facestyle/source_Gseg.png" alt="source Gseg" width="150"> <img src="examples/facestyle/source_Gpos.png" alt="source Gpos" width="150"> | <img src="examples/facestyle/source_painting.png" alt="source painting" width="300"> |
+| **Target** | <img src="examples/facestyle/target_Gapp.png" alt="target Gapp" width="150"> <img src="examples/facestyle/target_Gseg.png" alt="target Gseg" width="150"> <img src="examples/facestyle/target_Gpos.png" alt="target Gpos" width="150"> | <a href="examples/facestyle/output.png"><img src="examples/facestyle/output.png" alt="synthesized portrait" width="300"></a> |
+
+### 3. Texture by numbers
+
+A photo resynthesized from a hand-painted target segmentation map, from a single guide pair. Wants a smaller
+patch and a lighter uniformity penalty than the defaults.
+
+```bash
+python stylize.py \
+  -patchsize 3 -uniformity 1000 \
+  -style examples/texbynum/source_photo.png \
+  -guide examples/texbynum/source_segment.png examples/texbynum/target_segment.png \
+  -output examples/texbynum/output.png
+```
+
+|  | Guide — `segment` | Style |
+|:--:|:--:|:--:|
+| **Source** | <img src="examples/texbynum/source_segment.png" alt="source segmentation" width="270"> | <img src="examples/texbynum/source_photo.png" alt="source photo" width="270"> |
+| **Target** | <img src="examples/texbynum/target_segment.png" alt="target segmentation" width="270"> | <a href="examples/texbynum/output.png"><img src="examples/texbynum/output.png" alt="synthesized texture" width="270"></a> |
+
+### 4. StyLit
+
+A hand-painted, non-photorealistic shading style (an illuminated ball in colored pencil) transferred onto a
+3D render, guided by four path-traced lighting passes instead of raw pixel color: `fullgi` (full global
+illumination), `dirdif` (direct diffuse), `dirspc` (direct specular), `indirb` (indirect bounce). The four guide
+weights sum to 2.0 — the same 2:1 guide-to-style ratio as the original StyLit example.
+
+```bash
+python stylize.py \
+  -style examples/stylit/source_style.png \
+  -guide examples/stylit/source_fullgi.png examples/stylit/target_fullgi.png 0.5 \
+  -guide examples/stylit/source_dirdif.png examples/stylit/target_dirdif.png 0.5 \
+  -guide examples/stylit/source_dirspc.png examples/stylit/target_dirspc.png 0.5 \
+  -guide examples/stylit/source_indirb.png examples/stylit/target_indirb.png 0.5 \
+  -output examples/stylit/output.png
+```
+
+|  | Guides — `fullgi`, `dirdif`, `dirspc`, `indirb` | Style |
+|:--:|:--:|:--:|
+| **Source** | <img src="examples/stylit/source_fullgi.png" alt="source full GI" width="130"> <img src="examples/stylit/source_dirdif.png" alt="source direct diffuse" width="130"> <img src="examples/stylit/source_dirspc.png" alt="source direct specular" width="130"> <img src="examples/stylit/source_indirb.png" alt="source indirect bounce" width="130"> | <img src="examples/stylit/source_style.png" alt="source style" width="280"> |
+| **Target** | <img src="examples/stylit/target_fullgi.png" alt="target full GI" width="130"> <img src="examples/stylit/target_dirdif.png" alt="target direct diffuse" width="130"> <img src="examples/stylit/target_dirspc.png" alt="target direct specular" width="130"> <img src="examples/stylit/target_indirb.png" alt="target indirect bounce" width="130"> | <a href="examples/stylit/output.png"><img src="examples/stylit/output.png" alt="synthesized render" width="280"></a> |
+
+## Options
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-style <path> [weight]` | required, weight `1.0` | Style keyframe; its pixels are the only source of output color. |
+| `-guide <source> <target> [weight]` | at least one required, weight `1/N` | A guide pair. Repeatable for multiple guides (e.g. color + edges + optical flow). |
+| `-output <path>` | `output.png` | Output image path. Always written as PNG. |
+| `-uniformity <float>` | `3500.0` | Penalty discouraging the same source patch from being overused. |
+| `-patchsize <odd int, >= 3>` | `5` | Side length of the square matching patch. |
+| `-pyramidlevels <int>` | `-1` (auto) | Pyramid level count. Derived from image and patch size when `-1`. |
+| `-searchvoteiters <int>` | `6` | Match/vote iterations per pyramid level. |
+| `-patchmatchiters <int>` | `4` | Propagation + random-search iterations per match/vote round. |
+| `-stopthreshold <int>` | `5` | Accepted for CLI compatibility only; this engine has no per-pixel work to skip, so it is unused. |
+| `-extrapass3x3` | off | Final 3x3-patch pass that sharpens fine detail. |
 
 ## Project structure
 
@@ -48,109 +149,10 @@ Ebpynth/
 │   └── uniformity.py             # Penalizes overused source patches
 │
 └── examples/                     # Sample style/guide assets, one folder per use case
-    ├── frame/                    # Video frame stylization (a painted keyframe + raw frame pair)
-    ├── facestyle/                # Face portrait stylization (appearance/segmentation/position guides)
-    ├── texbynum/                 # Texture-by-numbers (a single segmentation-map guide)
-    └── stylit/                   # Illumination-guided 3D render stylization (multiple lighting-pass guides)
+    ├── frame/                    # Video frame stylization
+    ├── facestyle/                # Face portrait stylization
+    ├── texbynum/                 # Texture-by-numbers
+    └── stylit/                   # Illumination-guided 3D render stylization
 ```
 
-## Setup
-
-Requires Python 3.9+, PyTorch (CUDA build), torchvision, and Pillow.
-
-## Usage
-
-```bash
-python stylize.py -style <style_image> [weight] -guide <source_guide> <target_guide> [weight] [-guide ...] [options]
-```
-
-Example 1 — video frame stylization: a hand-painted keyframe (`source_painting`) is transferred onto a new
-frame, guided by the raw frame pair it was painted from (`source_frame` → `target_frame`):
-
-```bash
-python stylize.py \
-  -style examples/frame/source_painting.jpg \
-  -guide examples/frame/source_frame.jpg examples/frame/target_frame.jpg \
-  -output examples/frame/output.png \
-  -extrapass3x3
-```
-
-Example 2 — face portrait stylization (the "FaceStyle" use case from the original ebsynth): transfers a portrait
-painting's style onto a photo while preserving the subject's identity, using three facial-landmark-derived guides
-instead of raw pixels — `Gapp` (target's luminance matched to the painting, keeps identity), `Gseg` (soft face
-segmentation), and `Gpos` (a dense warp field mapping target pixels to their source correspondence):
-
-```bash
-python stylize.py \
-  -style examples/facestyle/source_painting.png \
-  -guide examples/facestyle/source_Gapp.png examples/facestyle/target_Gapp.png 2.0 \
-  -guide examples/facestyle/source_Gseg.png examples/facestyle/target_Gseg.png 1.5 \
-  -guide examples/facestyle/source_Gpos.png examples/facestyle/target_Gpos.png 1.5 \
-  -output examples/facestyle/output.png
-```
-
-Example 3 — texture-by-numbers: a photo is resynthesized from a hand-painted target segmentation map, using a
-single guide pair (source segmentation → target segmentation):
-
-```bash
-python stylize.py \
-  -patchsize 3 -uniformity 1000 \
-  -style examples/texbynum/source_photo.png \
-  -guide examples/texbynum/source_segment.png examples/texbynum/target_segment.png \
-  -output examples/texbynum/output.png
-```
-
-Example 4 — StyLit: transfers a hand-painted, non-photorealistic shading style (here, an illuminated ball drawn in
-colored pencil) onto a 3D-rendered model, using several path-traced lighting passes as guides instead of raw pixel
-color — `fullgi` (full global illumination), `dirdif` (direct diffuse), `dirspc` (direct specular), and `indirb`
-(indirect bounce). The four guide weights sum to 2.0, the same 2:1 guide-to-style ratio as the original StyLit
-example (which used three guides at 0.66 each):
-
-```bash
-python stylize.py \
-  -style examples/stylit/source_style.png \
-  -guide examples/stylit/source_fullgi.png examples/stylit/target_fullgi.png 0.5 \
-  -guide examples/stylit/source_dirdif.png examples/stylit/target_dirdif.png 0.5 \
-  -guide examples/stylit/source_dirspc.png examples/stylit/target_dirspc.png 0.5 \
-  -guide examples/stylit/source_indirb.png examples/stylit/target_indirb.png 0.5 \
-  -output examples/stylit/output.png
-```
-
-### Arguments
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `-style <path> [weight]` | path required, weight `1.0` | Style keyframe; its pixels are the only source of output color. Optional trailing weight. |
-| `-guide <source> <target> [weight]` | at least one required, weight `1/N` | A guide pair: `source` is pixel-aligned with the style image, `target` is aligned with the desired output. Optional trailing weight. Repeat for multiple guides (e.g. color + edges + optical flow). |
-| `-output <path>` | `output.png` | Output image path. |
-| `-uniformity <value>` | `3500.0` | Penalty weight discouraging the same source patch from being overused. |
-| `-patchsize <odd int, >= 3>` | `5` | Side length of the square patch used for matching. |
-| `-pyramidlevels <int>` | `-1` (auto) | Number of pyramid levels. Auto-derived from image size and patch size when `-1`. |
-| `-searchvoteiters <int>` | `6` | Match/vote iterations per pyramid level. |
-| `-patchmatchiters <int>` | `4` | Propagation + random-search iterations per match/vote round. |
-| `-stopthreshold <int>` | `5` | Accepted for CLI compatibility with the original tool; unused here — see note below. |
-| `-extrapass3x3` | off | Adds a final 3x3-patch pass that sharpens fine detail. |
-
-**Note on `-stopthreshold`:** in the original, this gates a per-pixel "skip already-converged pixels" optimization
-that only pays off in a per-thread CUDA kernel. In a fully vectorized implementation there's no per-pixel work to
-skip, and re-evaluating an already-optimal pixel is a no-op — so it's intentionally not implemented.
-
-## Workflow
-
-1. **Parse** CLI arguments into a config.
-2. **Load** the style image and every guide image straight onto the GPU as `(H, W, C)` `uint8` tensors.
-3. **Merge** all guides' channels into two feature tensors via `torch.cat` — one aligned with the style image
-   (source side), one aligned with the desired output (target side).
-4. **Plan** the pyramid: how many coarse-to-fine levels to use, how many iterations per level, and normalized
-   per-channel weight vectors for the style and guide terms.
-5. **Synthesize**, coarse to fine. At each pyramid level:
-   - Resize the style/guide tensors to that level's resolution.
-   - Initialize the NNF randomly (coarsest level) or upscale it from the previous level.
-   - Repeatedly **propagate** matches between neighboring pixels, **randomly search** for better ones (scored by a
-     weighted patch-distance cost, optionally penalized for overusing a source patch), and **re-vote** to refresh
-     the reconstructed image from the current NNF.
-6. **Refine** (optional): one more match/vote round at a smaller 3x3 patch size for sharper detail.
-7. **Save** the finished image to disk.
-
-The core state threaded through step 5 is the **NNF (Nearest-Neighbor Field)**: a per-pixel map from each output
-position to the style-image position it should copy from. Synthesis is the process of optimizing that map.
+Most modules run standalone as a self-test, e.g. `python synthesis/vote.py` (run from the repo root).
