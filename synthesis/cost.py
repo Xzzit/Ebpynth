@@ -4,21 +4,20 @@ import torch.nn.functional as F
 
 def build_channel_scales(style_weights, guide_weights):
     """
-    Concatenates style_weights + guide_weights into one CUDA float tensor and returns
-    its element-wise square root. The original patch cost is
-    Σ styleWeights·(styleDiff)² + Σ guideWeights·(guideDiff)² (PatchSSD_Split,
-    ebsynth_cuda.cu ~line 601) — since that's just a weighted sum of squared
-    per-channel diffs either way, treating style and guide channels as one
-    concatenated channel axis with one concatenated weight vector is mathematically
-    identical and collapses the whole patch cost into a single weighted SSD.
+    Per-channel √weight — the scale factor folded into both feature tensors.
 
-    Why sqrt: Σ w_c·(t_c - s_c)² is identically Σ (√w_c·t_c - √w_c·s_c)². Folding
-    √w into BOTH feature tensors once per pyramid level (build_combined_source and
-    pad_target below) turns the weighted SSD into a plain SSD, so patch_cost's
-    hot loop drops the per-offset weight multiply entirely. That loop runs
-    patch_size² times per call and thousands of times per synthesis, and the whole
-    engine is bound by op-dispatch overhead rather than bandwidth, so removing ops
-    from it is what actually buys time.
+    Style and guide channels are treated as one concatenated channel axis carrying one
+    concatenated weight vector, which collapses the whole patch cost into a single
+    weighted SSD; scoring the two terms separately and adding them is mathematically
+    identical, since either way it is a weighted sum of squared per-channel diffs.
+
+    Why sqrt: Σ w_c·(t_c - s_c)² is identically Σ (√w_c·t_c - √w_c·s_c)². Folding √w
+    into BOTH feature tensors once per pyramid level (build_combined_source and
+    pad_target below) turns the weighted SSD into a plain SSD, so patch_cost's hot
+    loop drops the per-offset weight multiply entirely. That loop runs patch_size²
+    times per call and thousands of times per synthesis, and the engine is bound by
+    op-dispatch overhead rather than bandwidth, so removing ops from it is what
+    actually buys time.
 
     Args:
         style_weights: list of C_style floats (plan_pyramid's per-style-channel weights).
@@ -34,10 +33,11 @@ def build_channel_scales(style_weights, guide_weights):
 def build_combined_source(source_style, source_guides, scales):
     """
     Concatenates the style and source-guide tensors along the channel axis and
-    pre-scales them by √weight — the fixed half of the cost function. Built once per
-    pyramid level since neither input changes while the NNF is being refined within
-    that level; that also hoists the uint8→float32 conversion out of patch_cost,
-    which used to redo it on every single call.
+    pre-scales them by √weight — the fixed half of the cost function.
+
+    Built once per pyramid level, since neither input changes while the NNF is refined
+    within a level. That also hoists the uint8→float32 conversion out of patch_cost,
+    which would otherwise redo it on every call.
 
     Args:
         source_style: uint8 CUDA tensor, shape (H_style, W_style, C_style).
@@ -53,10 +53,12 @@ def build_combined_source(source_style, source_guides, scales):
 def pad_target(combined_target, patch_size, scales):
     """
     Pre-scales the running target-side feature tensor by √weight, then replicate-pads
-    it by r on every side so every patch window — even one centered on the image
-    border — can be read as a plain static slice with no per-pixel bounds checking.
-    Source-side patches never need this: the NNF invariant (nnf.py) already keeps
-    every source patch center at least r away from the source border.
+    it by r on every side.
+
+    The padding is what lets every patch window — even one centered on the image
+    border — be read as a plain static slice with no per-pixel bounds checking.
+    Source-side patches never need it: the NNF invariant (nnf.py) already keeps every
+    source patch center at least r away from the source border.
 
     The result is made contiguous: patch_cost slices it patch_size² times per call,
     and a permuted (non-contiguous) view makes every one of those reads strided.
@@ -78,9 +80,10 @@ def pad_target(combined_target, patch_size, scales):
 
 def patch_cost(nnf, combined_source, combined_target_padded, patch_size):
     """
-    Full-field patch SSD, replacing PatchSSD_Split (ebsynth_cuda.cu ~line 601): for
-    every target pixel q, compares the patch_size x patch_size patch centered at q
-    (in combined_target) against the patch centered at nnf[q] (in combined_source).
+    Full-field patch SSD: for every target pixel q, compares the patch_size x
+    patch_size patch centered at q (target side) against the patch centered at nnf[q]
+    (source side).
+
     Same gather-per-offset trick as vote_image (synthesis/vote.py): for a fixed
     (dy, dx), the source side is one flat-index gather and the target side is one
     static slice of the padded tensor — patch_size² of these, accumulated.

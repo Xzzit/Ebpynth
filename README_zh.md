@@ -159,7 +159,7 @@ style 图不参与拼接，独立一路，留到成像阶段使用。`torch.cat`
   双线性缩放，不逐层级联缩小，避免误差累积。
 - 4b NNF 初值：最粗层 `init_random_nnf` 随机初始化；更细层 `upscale_nnf` 把上一层 NNF 坐标 ×2 并加
   `(x%2, y%2)` 抖动（避免同一粗格子对应的 2×2 子像素挤在同一起点，给下一层搜索一点初始多样性）。
-- 最细层输出即最终结果，除非开启 `-extrapass3x3`（见 4.9）。
+- 最细层输出即最终结果，除非开启 `-extrapass3x3`（见阶段 5）。
 
 > ⚠️ 原版 `nnfUpscale` 钳制到 `[patchSize, size-1-patchSize]`，比本项目统一用的 `[r, size-1-r]`
 > 更严，且与其自身 `nnfInitRandom` 的边界不一致。本项目不追随这处不一致，全程用同一套不变量
@@ -259,12 +259,12 @@ uint8→float32 转换也都提到了循环外。
 > 手段。全向量化实现没有可省的逐像素分支，重算已收敛像素也无害（只在严格更优时才替换），因此故意
 > 不实现，仅为兼容 CLI 保留参数。
 
-#### 4.9 extrapass3x3 —— `stylize.py` 阶段 4.9 段
+### 阶段 5（可选）：extrapass3x3 —— `stylize.py` 阶段 5 段
 
 开启后，在最细层收敛的 NNF 上再跑一遍同样的 match/vote 循环：`patch_size` 强制为 3，均匀性惩罚
-强制关闭，不重新初始化。原版做法是层计数器减一、重入最细层循环体，效果等价。
+强制关闭，NNF 直接沿用、不重新初始化。
 
-### 阶段 5：保存图片 —— `utils/image_io.py: save_image_from_vram`
+### 阶段 6：保存图片 —— `utils/image_io.py: save_image_from_vram`
 
 `output_image` permute 回 `(C, H, W)` → `.cpu()` → `torchvision.io.write_png`；2/4 通道（带 alpha）
 因编码器不支持，改用 PIL 写 LA/RGBA。

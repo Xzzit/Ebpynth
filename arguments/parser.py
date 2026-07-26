@@ -5,11 +5,12 @@ from typing import Dict, Any
 
 def parse_arguments(argv=None) -> Dict[str, Any]:
     """
-    Parses CLI arguments into a plain config dict, replacing the original's tryToParseArg
-    loop (ebsynth.cpp ~lines 195-304). Weight is inline on -style/-guide (nargs="+", the
-    trailing token parsed as a float when present) instead of a separate cascading -weight
-    flag, so there's no parser state tracking "which flag was declared last." No tensors
-    here — output is plain Python types.
+    Parses CLI arguments into a plain config dict. No tensors — plain Python types only.
+
+    -style and -guide carry their weight as an optional trailing token (nargs="+"; the
+    token count tells you whether one was given), so no parser state is needed to track
+    which flag a weight belongs to. An omitted weight comes back as the sentinel -1.0,
+    which plan_pyramid resolves into the real default.
 
     Args:
         argv: full argv list including the program name at index 0 (e.g. sys.argv), or

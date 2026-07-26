@@ -6,16 +6,20 @@ try:
 except ImportError:
     from image_io import load_image_to_vram
 
-# Mirrored from ebpynth/include/ebsynth.h — the CUDA kernel's hard channel limits.
+# Channel-count ceilings enforced by merge_guides. Nothing in this implementation
+# actually needs them; they are kept so the same inputs are accepted or rejected as
+# before, and because a run far past these counts is almost certainly a mistake.
 EBSYNTH_MAX_STYLE_CHANNELS = 8
 EBSYNTH_MAX_GUIDE_CHANNELS = 24
 
 
 def _expand_channels(tensor: torch.Tensor, num_channels: int) -> torch.Tensor:
     """
-    Re-expands a channel-collapsed guide tensor up to num_channels, replicating how
-    the original packing loops always draw from the full RGBA buffer (ebsynth.cpp
-    ~lines 347-381): lane order is R, then A if 2 channels, else G/B/A.
+    Re-expands a channel-collapsed guide tensor up to num_channels.
+
+    Undoes load_image_to_vram's collapsing by rebuilding the four RGBA lanes and
+    re-slicing them. Lane order is R, then A for 2 channels (R+A, NOT R+G) — a
+    2-channel image is gray+alpha, so its second lane is alpha, not green.
 
     Args:
         tensor: uint8 CUDA tensor, shape (H, W, C) with C in {1, 2, 3, 4}.
@@ -55,9 +59,10 @@ def _expand_channels(tensor: torch.Tensor, num_channels: int) -> torch.Tensor:
 
 def merge_guides(guides, style_shape, style_file):
     """
-    Twists all guide channels together into two mega feature tensors via torch.cat,
-    replacing the original per-guide load/validate loop and the two nested per-pixel
-    packing loops (ebsynth.cpp lines ~327-381) in one vectorized shot.
+    Loads every guide pair and concatenates all their channels into two feature
+    tensors — one source-side, one target-side — plus the per-guide channel counts
+    the weight planner needs. Also runs the validation torch.cat cannot: resolution
+    agreement, channel alignment, and the channel-count ceilings.
 
     Args:
         guides: list of {"source": path, "target": path, "weight": float} dicts,
@@ -96,8 +101,9 @@ def merge_guides(guides, style_shape, style_file):
             print(f"error: target guide '{guide['target']}' doesn't match the resolution of '{guides[0]['target']}'", file=sys.stderr)
             sys.exit(1)
 
-        # A guide's source/target can collapse to different channel counts; the original
-        # aligns both sides up to std::max before packing (ebsynth.cpp line ~338)
+        # A guide's source and target can collapse to different channel counts (e.g. a
+        # gray source paired with an RGB target); align both up to max, or the
+        # concatenated tensors would have mismatched channel layouts
         num_channels = max(src.shape[-1], tgt.shape[-1])
         source_list.append(_expand_channels(src, num_channels))
         target_list.append(_expand_channels(tgt, num_channels))
@@ -146,4 +152,4 @@ if __name__ == "__main__":
     ga = torch.stack([gray[..., 0], torch.full((4, 4), 128, dtype=torch.uint8, device="cuda")], dim=-1)
     expanded2 = _expand_channels(ga, 4)
     assert expanded2.shape == (4, 4, 4) and torch.all(expanded2[..., 3] == 128), "2→4 expansion failed"
-    print("  channel alignment (std::max) checks passed ✓")
+    print("  channel alignment checks passed ✓")

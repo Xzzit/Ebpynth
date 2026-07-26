@@ -8,12 +8,14 @@ except ImportError:
 
 def random_search(nnf, cost, combined_source, combined_target_padded, patch_size, uniformity=None):
     """
-    Replaces the growing-radius trial loop around krnlRandomSearchPass
-    (ebsynth_cuda.cu ~line 355): for r = 1, 2, 4, 8, ... (doubling until half the
-    source's largest dimension), every pixel samples ONE random candidate within
-    +-r of its current match and keeps it if it's cheaper. Propagation alone only
-    ever spreads matches that already exist somewhere in the image; this is what
-    lets PatchMatch discover genuinely new, better matches and escape local optima.
+    Growing-radius random search: for r = 1, 2, 4, 8, ... (doubling until half the
+    source's largest dimension), every pixel samples ONE random candidate within +-r
+    of its current match and keeps it if it's cheaper.
+
+    Propagation alone only ever spreads matches that already exist somewhere in the
+    image; this is what discovers genuinely new ones and escapes local optima. The
+    doubling radius covers both fine local refinement and whole-image jumps in
+    log2(size) trials per pixel.
 
     Args:
         nnf: int64 CUDA tensor, shape (H_target, W_target, 2), (y, x) source coords.

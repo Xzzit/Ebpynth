@@ -1,9 +1,10 @@
 def plan_pyramid(config, style_shape, target_shape, guide_channels):
     """
-    Plans the coarse-to-fine pyramid schedule and per-channel weight vectors,
-    replacing the original's tail-end scalar math (ebsynth.cpp lines ~383-426).
-    Pure CPU-side arithmetic — no tensors involved: the CUDA kernel builds the
-    actual pyramid itself, this only fills in its control sheet.
+    Plans the coarse-to-fine schedule: level count, per-level iteration counts and the
+    per-channel weight vectors.
+
+    Pure CPU scalar arithmetic — no tensors. This only fills in the control sheet; the
+    pyramid tensors themselves are built level by level in stylize.py's main loop.
 
     Args:
         config: the dict produced by arguments.parse_arguments().
@@ -11,7 +12,7 @@ def plan_pyramid(config, style_shape, target_shape, guide_channels):
         target_shape: shape of the merged target guides — only [0]/[1] (H, W) are used.
         guide_channels: per-guide aligned channel counts from merge_guides().
 
-    Returns a dict mirroring ebsynthRunCuda's control parameters:
+    Returns a dict with:
         num_pyramid_levels: int, auto-derived when -1 and always clamped to the max
         search_vote_iters_per_level / patch_match_iters_per_level /
         stop_threshold_per_level: int lists of length num_pyramid_levels
@@ -24,8 +25,8 @@ def plan_pyramid(config, style_shape, target_shape, guide_channels):
     patch_size = config["patch_size"]
 
     # Auto level count: keep halving until the smallest of the four dimensions can no
-    # longer fit one search window of (2*patchsize+1) pixels (ebsynth.cpp lines ~405-416).
-    # Float scale + int truncation reproduces pyramidLevelSize()'s V2f->V2i rounding.
+    # longer fit one search window of (2*patchsize+1) pixels. Float scale + int
+    # truncation, matching level_size() exactly — an integer shift can be off by one.
     min_dim = min(style_h, style_w, target_h, target_w)
     max_levels = 0
     for level in range(32, -1, -1):
@@ -38,20 +39,20 @@ def plan_pyramid(config, style_shape, target_shape, guide_channels):
         num_levels = max_levels
     num_levels = min(num_levels, max_levels)  # explicit user values get silently clamped too
 
-    # The kernel API allows different effort per level; the CLI semantics never use
-    # that freedom, so each array is just the same scalar replicated L times.
+    # Per-level arrays so the engine can vary effort by level, but the CLI exposes one
+    # scalar for each, so today these are just that scalar replicated L times.
     search_vote_iters_per_level = [config["num_search_vote_iters"]] * num_levels
     patch_match_iters_per_level = [config["num_patch_match_iters"]] * num_levels
     stop_threshold_per_level = [config["stop_threshold"]] * num_levels
 
-    # Style camp: total say of style_weight (default 1.0), split evenly per channel
+    # Style side: a total say of style_weight (default 1.0), split evenly per channel
     style_weight = config["style_weight"]
     if style_weight < 0:
         style_weight = 1.0
     style_weights = [style_weight / float(style_c)] * style_c
 
-    # Guide camp: each guide defaults to 1/numGuides, then spreads over its channels,
-    # so unweighted guides collectively always speak with a total voice of 1.0
+    # Guide side: each guide defaults to 1/num_guides, then spreads over its own
+    # channels, so unweighted guides collectively always sum to a total voice of 1.0
     num_guides = len(guide_channels)
     guide_weights = []
     for i, channels in enumerate(guide_channels):

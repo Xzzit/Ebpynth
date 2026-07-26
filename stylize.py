@@ -34,7 +34,7 @@ def main():
     # loop is a plain SSD with no weight multiply (see synthesis/cost.py)
     scales = build_channel_scales(plan["style_weights"], plan["guide_weights"])
 
-    # Parity printout, matching the original CLI output (ebsynth.cpp ~430-436)
+    # Echo the resolved configuration
     print(f"uniformity: {config['uniformity_weight']:.0f}")
     print(f"patchsize: {patch_size}")
     print(f"pyramidlevels: {num_levels}")
@@ -81,10 +81,9 @@ def main():
                                           patch_size, uniformity)
             target_style = vote_image(nnf, lvl_source_style, patch_size)
 
-    # Stage 4.9 (optional): extrapass3x3 refinement pass. Re-runs the same match/vote
-    # loop on the finest level's converged NNF, forcing patch_size=3 and uniformity
-    # off, replacing the original's re-entry into its own finest level
-    # (ebsynth_cuda.cu ~1089-1095).
+    # Stage 5 (optional): -extrapass3x3 refinement. Re-runs the same match/vote loop
+    # on the finest level's converged NNF — no re-initialization, the NNF carries
+    # straight over — with patch_size forced to 3 and uniformity off.
     if config["extra_pass_3x3"]:
         combined_source = build_combined_source(source_style, source_guides, scales)
         target_style = vote_image(nnf, source_style, 3)
@@ -96,7 +95,7 @@ def main():
                 nnf, cost = random_search(nnf, cost, combined_source, combined_target_padded, 3)
             target_style = vote_image(nnf, source_style, 3)
 
-    # Stage 5: save the output image
+    # Stage 6: save the output image
     assert target_style.shape == (target_h, target_w, style_c), \
         "engine output shape drifted from the planned canvas"
     save_image_from_vram(target_style, config["output_file"])

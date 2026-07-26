@@ -8,22 +8,21 @@ except ImportError:
 
 def propagate(nnf, cost, combined_source, combined_target_padded, patch_size, uniformity=None):
     """
-    Jump-flood propagation, replacing krnlPropagationPass (ebsynth_cuda.cu ~line 187).
-    The original runs on a serial scanline — each pixel reads a neighbor that was
-    already updated earlier in the same pass, letting a good match crawl across the
-    whole image in one pass. A fully parallel rewrite can't rely on that ordering
-    (every pixel updates simultaneously), so — exactly like the original CUDA
-    version already does to make its own execution parallel-friendly — propagation
-    happens at shrinking jump distances (4, then 2, then 1) instead of a single
-    1-pixel step, so information can still cross the image in a handful of passes.
+    Jump-flood propagation: spread good matches to neighbors at shrinking jump
+    distances (4, then 2, then 1).
 
-    For each jump distance r and each of 4 directions (-r,0)/(+r,0)/(0,-r)/(0,+r):
-    "if my neighbor r pixels away is using source position s for itself, then
-    s - offset is what my own patch would use if it shared that neighbor's alignment
-    — worth trying." Candidates are tried one direction at a time (not batched),
-    each immediately updating the running best — so a later direction's comparison
-    (and, with uniformity enabled, its occupancy bookkeeping) always sees the
-    outcome of the earlier ones, mirroring tryNeighborsOffset's sequential calls.
+    Why jump-flood rather than a plain 1-pixel step: a serial scanline pass lets each
+    pixel read a neighbor already updated earlier in the same sweep, so one good match
+    can crawl across the whole image in a single pass. A vectorized pass updates every
+    pixel simultaneously and cannot rely on that ordering, so the shrinking jump
+    distances are what keep information able to cross the image in a few passes.
+
+    For each jump distance j and each of 4 directions (-j,0)/(+j,0)/(0,-j)/(0,+j):
+    "if my neighbor j pixels away uses source position s for itself, then s - offset
+    is what my own patch would use under that same alignment — worth trying."
+    Directions are tried one at a time, not batched, each immediately updating the
+    running best, so a later direction's comparison — and, with uniformity enabled,
+    its occupancy bookkeeping — always sees the outcome of the earlier ones.
 
     Args:
         nnf: int64 CUDA tensor, shape (H_target, W_target, 2), (y, x) source coords.
@@ -34,7 +33,7 @@ def propagate(nnf, cost, combined_source, combined_target_padded, patch_size, un
         uniformity: optional Uniformity instance; None disables the occupancy penalty.
 
     Returns:
-        (nnf, cost) — same shapes/dtypes as the inputs, updated in place of a copy.
+        (nnf, cost) — new tensors, same shapes/dtypes as the inputs.
     """
     src_h, src_w, _ = combined_source.shape
     tgt_h, tgt_w = nnf.shape[0], nnf.shape[1]
@@ -95,8 +94,7 @@ if __name__ == "__main__":
     # together): source_guide == target_guide exactly (same random-noise image, no
     # repeated texture to create false matches), so the true global optimum is the
     # identity NNF with zero cost. style_weights are zeroed so only the guide term
-    # drives matching. (Formerly run_patchmatch's sandbox; the match/vote loop now
-    # lives inline in stylize.py, so the core iteration is tested here instead.)
+    # drives matching.
     torch.manual_seed(0)
     size, patch_size = 32, 5
     noise_style = torch.randint(0, 256, (size, size, 3), dtype=torch.uint8, device="cuda")

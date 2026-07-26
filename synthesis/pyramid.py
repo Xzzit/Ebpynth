@@ -4,10 +4,12 @@ import torch.nn.functional as F
 
 def level_size(base_h, base_w, num_levels, level):
     """
-    Replicates pyramidLevelSize (ebsynth_cuda.cu ~line 742): scales the full-res
-    size by 2^-(numLevels-1-level), so level=numLevels-1 (last, finest) is the
-    original size and level=0 (first) is the coarsest. int() truncates exactly
-    like the original's V2f -> V2i cast.
+    Resolution of one pyramid level: the full-res size scaled by
+    2^-(num_levels-1-level), so level 0 is the coarsest and level num_levels-1 is the
+    original size.
+
+    Float scale then truncate, not an integer right shift — the two disagree by a
+    pixel at some sizes, and this must agree with plan_pyramid's level-count math.
 
     Args:
         base_h, base_w: full (finest) resolution.
@@ -23,10 +25,10 @@ def level_size(base_h, base_w, num_levels, level):
 
 def resize_image(img, new_h, new_w):
     """
-    Bilinear resample, replacing krnlResampleBilinear (ebsynth_cuda.cu ~line 524).
-    Always resamples from the ORIGINAL full-resolution tensor down to a level's
-    size (not progressively level-to-level), matching the original's resampleGPU
-    calls, which all source from pyramid[levelCount-1].
+    Bilinear resample down to a pyramid level's resolution.
+
+    Always resamples from the ORIGINAL full-resolution tensor, never progressively
+    level-to-level, so repeated interpolation can't accumulate blur down the pyramid.
 
     Args:
         img: uint8 CUDA tensor, shape (H, W, C) — always the original full-res image.
@@ -42,20 +44,16 @@ def resize_image(img, new_h, new_w):
 
 def upscale_nnf(nnf, new_target_h, new_target_w, new_source_h, new_source_w, patch_size):
     """
-    Carries a coarse level's converged NNF up to the next, roughly-2x-finer level
-    as its starting guess, replacing nnfUpscale (ebsynth_cuda.cu ~line 387): each
-    new pixel inherits its coarse "parent" pixel's match, doubled, with a +0/+1
-    jitter from (x%2, y%2) so a 2x2 block of children doesn't all collapse onto
-    the exact same starting patch — cheap free diversity for the next level's
-    search to build on, instead of every child needing to rediscover it from
-    identical priors.
+    Carries a coarse level's converged NNF up to the next, roughly-2x-finer level as
+    its starting guess: each new pixel inherits its coarse "parent" pixel's match,
+    doubled, plus a +0/+1 jitter from (x%2, y%2).
 
-    Bounds are clamped to this project's [r, size-1-r] NNF invariant (r =
-    patch_size // 2), same as nnf.py/propagate.py/random_search.py. Note: the
-    original clamps to [patchSize, size-1-patchSize] here specifically — a
-    stricter, inconsistent-with-its-own-nnfInitRandom margin. We keep one
-    invariant everywhere instead of replicating that asymmetry; it's a strict
-    subset of the safe range, so nothing breaks, it's simply not bug-for-bug here.
+    The jitter matters: without it a 2x2 block of children all start from the exact
+    same source patch, and the finer level's search has to rediscover that diversity
+    from identical priors.
+
+    Coordinates are clamped to the project-wide [r, size-1-r] NNF invariant
+    (r = patch_size // 2), same as nnf.py / propagate.py / random_search.py.
 
     Args:
         nnf: int64 CUDA tensor, shape (H_old_target, W_old_target, 2) — the coarse
@@ -97,7 +95,7 @@ if __name__ == "__main__":
 
     from synthesis.nnf import init_random_nnf
 
-    # ① level_size sanity: finest level must reproduce the exact original size,
+    # 1. level_size sanity: finest level must reproduce the exact original size,
     # and sizes must strictly increase (or stay equal) going coarse -> fine
     sizes = [level_size(540, 960, 6, lvl) for lvl in range(6)]
     print("Level sizes (540x960, 6 levels):", sizes)
@@ -105,7 +103,7 @@ if __name__ == "__main__":
     assert all(sizes[i][0] <= sizes[i + 1][0] and sizes[i][1] <= sizes[i + 1][1] for i in range(5)), \
         "level sizes must be non-decreasing from coarse to fine"
 
-    # ② upscale_nnf sanity: a coarse NNF's structure should survive doubling —
+    # 2. upscale_nnf sanity: a coarse NNF's structure should survive doubling —
     # each 2x2 child block's floor-halved value must recover its exact parent
     coarse_nnf = init_random_nnf(4, 4, 4, 4, patch_size=3)
     fine_nnf = upscale_nnf(coarse_nnf, 8, 8, 8, 8, patch_size=3)

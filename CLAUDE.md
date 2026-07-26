@@ -10,10 +10,12 @@ pyramid + patch voting). `stylize.py` is a working drop-in replacement for the o
 single style image + N guide pairs → one synthesized PNG. No C++/CUDA is compiled; everything is PyTorch tensor
 ops on CUDA. It is roughly an order of magnitude slower than the native kernel.
 
-**The upstream C++/CUDA source is NOT present in this repo or beside it.** Docstrings throughout cite
-`ebsynth.cpp` / `ebsynth_cuda.cu` line numbers (e.g. "replacing krnlPropagationPass, ~line 187"). Those are
-**historical provenance notes explaining why the code is shaped the way it is** — do not try to open those files,
-and do not treat "match the original" as a live requirement. This is now a standalone learning project.
+**The upstream C++/CUDA source is NOT present in this repo or beside it, and the code no longer refers to it.**
+Docstrings used to cite `ebsynth.cpp` / `ebsynth_cuda.cu` kernel names and line numbers as provenance; those were
+deliberately stripped, because this is now a standalone learning project and the citations pointed at files nobody
+can open. The *reasoning* they carried was kept and rewritten to stand on its own (why jump-flood instead of a
+1-pixel step, why the target side is padded, why channels are aligned to `max`). **Do not reintroduce upstream
+citations**, and do not treat "match the original" as a live requirement.
 
 Two consequences of that standalone status, both settled decisions:
 - The bar for the synthesis engine was never byte-equality with the original (PatchMatch is randomized and the
@@ -25,7 +27,7 @@ Two consequences of that standalone status, both settled decisions:
 ## Project goals (current phase)
 
 1. **Understand the algorithm** — walking the pipeline end to end. `README_zh.md` is the user's primary reading
-   copy (Chinese, detailed); `README.md` is the concise public English one. `README_zh.md`'s 阶段 0–5 / 4a-4b-4c
+   copy (Chinese, detailed); `README.md` is the concise public English one. `README_zh.md`'s 阶段 0–6 / 4a-4b-4c
    headings deliberately mirror `stylize.py`'s section comments — **keep them in sync when the pipeline changes.**
 2. **Then optimize for speed.** See the Performance section below for measured hotspots — read it before
    proposing any optimization, and re-measure rather than guessing.

@@ -6,16 +6,16 @@ import torchvision.io as tv_io
 
 def load_image_to_vram(file_path: str) -> torch.Tensor:
     """
-    Loads an image from disk straight onto the GPU, replacing tryLoad + evalNumChannels
-    (ebsynth.cpp ~lines 134-153, 310-321).
+    Loads an image from disk straight onto the GPU.
 
     Args:
         file_path: path to a PNG/JPG (or similar) image on disk.
 
     Returns:
-        uint8 CUDA tensor, shape (H, W, C), contiguous. C is collapsed like the
-        original evalNumChannels: opaque grayscale -> 1, grayscale+alpha -> 2,
-        opaque RGB/RGBA -> 3, RGBA with real transparency -> 4.
+        uint8 CUDA tensor, shape (H, W, C), contiguous. C is collapsed to the image's
+        real information content: opaque grayscale -> 1, grayscale+alpha -> 2, opaque
+        RGB/RGBA -> 3, RGBA with real transparency -> 4. Fewer channels means fewer
+        channels in the cost function's inner loop, so this is not just tidiness.
     """
     if not os.path.exists(file_path):
         print(f"error: failed to load '{file_path}'\nReason: File not found.", file=sys.stderr)
@@ -25,11 +25,13 @@ def load_image_to_vram(file_path: str) -> torch.Tensor:
         # UNCHANGED mode: load raw native layers (1-channel gray, 3-channel RGB, or 4-channel RGBA)
         img_tensor = tv_io.read_image(file_path, tv_io.ImageReadMode.UNCHANGED)
         img_tensor = img_tensor.permute(1, 2, 0)  # (C, H, W) -> this project's (H, W, C) convention
+        # permute only rewrites strides; .contiguous() before .cuda() so the upload is
+        # one linear copy and every later gather reads a packed layout
         gpu_tensor = img_tensor.contiguous().cuda()
 
         h, w, c = gpu_tensor.shape
 
-        # Channel collapsing, mirroring evalNumChannels
+        # Channel collapsing: drop lanes that carry no information
         if c >= 3:
             is_gray = torch.all(gpu_tensor[..., 0] == gpu_tensor[..., 1]) and torch.all(gpu_tensor[..., 1] == gpu_tensor[..., 2])
             has_alpha = False
@@ -59,9 +61,8 @@ def load_image_to_vram(file_path: str) -> torch.Tensor:
 
 def save_image_from_vram(gpu_tensor: torch.Tensor, file_path: str) -> None:
     """
-    Writes a GPU image tensor to disk as PNG, replacing the original's stbi_write_png
-    call (ebsynth.cpp ~line 461), which always writes PNG regardless of the output
-    file's extension.
+    Writes a GPU image tensor to disk. Always encodes PNG, whatever extension the
+    output path carries.
 
     Args:
         gpu_tensor: uint8 CUDA tensor, shape (H, W, C), C in {1, 2, 3, 4}.

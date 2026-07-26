@@ -4,13 +4,14 @@ import torch.nn.functional as F
 
 def compute_omega(nnf, source_shape, patch_size):
     """
-    Occupancy count per source pixel: how many currently-active target patches
-    claim to draw from it, replacing the Omega initialization loop
-    (ebsynth_cuda.cu ~lines 885-906). Mirror image of patch_cost's gather loop
-    (cost.py): same nested (dy, dx) offset loop, but scattering +1 INTO the source
-    instead of gathering values FROM it — "which source pixels does this NNF
-    touch" genuinely needs a scatter, unlike vote_image's "who covers me" question,
-    which had a fixed slice per offset because it asked about the TARGET side.
+    Occupancy count per source pixel: how many currently-active target patches claim
+    to draw from it.
+
+    Mirror image of patch_cost's gather loop (cost.py): same nested (dy, dx) offset
+    loop, but scattering +1 INTO the source instead of gathering values FROM it.
+    "Which source pixels does this NNF touch" genuinely needs a scatter, unlike
+    vote_image's "who covers me", which gets a fixed slice per offset because it asks
+    about the TARGET side.
 
     Args:
         nnf: int64 CUDA tensor, shape (H_target, W_target, 2), (y, x) source coords.
@@ -32,11 +33,12 @@ def compute_omega(nnf, source_shape, patch_size):
 
 def ideal_omega(target_shape, source_shape, patch_size):
     """
-    The per-window occupancy a source patch would carry under perfectly uniform
-    usage, replacing tryPatch's omegaBest (ebsynth_cuda.cu ~line 140): the target's
-    pixels collectively make target_area * patch_size² claims; spread evenly over
-    the source, patch_size² of those land on any given patch_size x patch_size
-    window on average.
+    The occupancy one source pixel would carry under perfectly uniform usage — the
+    reference value score() measures actual occupancy against.
+
+    Every target pixel scatters patch_size² claims, so the target makes
+    target_area * patch_size² of them in total; spread evenly over source_area
+    pixels, that is the per-pixel share below.
 
     Args:
         target_shape: (H_target, W_target) tuple.
@@ -44,7 +46,7 @@ def ideal_omega(target_shape, source_shape, patch_size):
         patch_size: odd int, side length of the square patch.
 
     Returns:
-        float — the ideal (uniform-usage) occupancy scalar.
+        float — the ideal (uniform-usage) per-source-pixel occupancy.
     """
     target_area = target_shape[0] * target_shape[1]
     source_area = source_shape[0] * source_shape[1]
@@ -53,14 +55,14 @@ def ideal_omega(target_shape, source_shape, patch_size):
 
 class Uniformity:
     """
-    Bundles the occupancy state (Omega) and the uniformity penalty weight so
-    propagate/random_search can factor "don't overuse this source patch" into
-    their accept/reject decisions, replacing tryPatch's lambda*occupancy term
-    (ebsynth_cuda.cu ~lines 95-156). One instance lives for an entire pyramid
-    level (constructed once from that level's starting NNF, updated incrementally
-    as matches change across every vote/patchmatch iteration of that level) —
-    pass uniformity=None anywhere it's accepted to disable the term entirely
-    (Task G/H's original behavior, still the default).
+    Occupancy state (Omega) plus the penalty weight, so propagate/random_search can
+    factor "don't overuse this source patch" into their accept/reject decisions:
+    they compare cost + weight*(occupancy/ideal) instead of raw cost.
+
+    One instance lives for an entire pyramid level — constructed from that level's
+    starting NNF, then updated incrementally as matches change across every
+    vote/patchmatch iteration of the level. Pass uniformity=None anywhere it is
+    accepted to disable the penalty entirely.
     """
 
     def __init__(self, nnf, source_shape, target_shape, patch_size, weight):
@@ -71,7 +73,7 @@ class Uniformity:
             source_shape: (H_source, W_source) tuple.
             target_shape: (H_target, W_target) tuple.
             patch_size: odd int, side length of the square patch.
-            weight: float, the uniformity penalty weight (-uniformity CLI value).
+            weight: float, the penalty weight (-uniformity CLI value).
         """
         self.omega = compute_omega(nnf, source_shape, patch_size)
         self.ideal = ideal_omega(target_shape, source_shape, patch_size)
@@ -114,13 +116,15 @@ class Uniformity:
 
     def score(self, cost, nnf):
         """
+        Raw patch cost plus the occupancy penalty — the value propagate and
+        random_search actually compare when uniformity is enabled.
+
         Args:
             cost: float32 CUDA tensor, shape (H_target, W_target) — raw patch cost.
             nnf: int64 CUDA tensor, shape (H_target, W_target, 2).
 
         Returns:
-            float32 CUDA tensor, shape (H_target, W_target) — cost plus the
-            occupancy penalty, used in place of raw cost for accept/reject decisions.
+            float32 CUDA tensor, shape (H_target, W_target) — the penalized cost.
         """
         src_w = self.omega.shape[1]
         patch_occupancy = self._box_sum()[nnf[..., 0] * src_w + nnf[..., 1]]
