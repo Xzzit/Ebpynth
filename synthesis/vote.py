@@ -75,7 +75,7 @@ if __name__ == "__main__":
     from utils import load_image_to_vram, save_image_from_vram
     from synthesis.nnf import init_random_nnf
 
-    style = load_image_to_vram("examples/video/output_frames/000.png")
+    style = load_image_to_vram("examples/frame/source_painting.jpg")
     h, w, c = style.shape
     patch_size = 5
     r = patch_size // 2
@@ -96,7 +96,10 @@ if __name__ == "__main__":
     assert int(nnf[..., 1].min()) >= r and int(nnf[..., 1].max()) <= w - 1 - r
     print("Random NNF respects the patch-center bounds ✓")
 
-    out_dir = "examples/video/temp"
+    # Scratch dir for debug artifacts — created on demand, and covered by .gitignore's
+    # examples entry so these mosaics never show up as untracked files
+    out_dir = "examples/temp"
+    os.makedirs(out_dir, exist_ok=True)
     gather_path = os.path.join(out_dir, "task_f_gather.png")
     vote_path = os.path.join(out_dir, "task_f_vote.png")
     save_image_from_vram(gather_image(nnf, style), gather_path)

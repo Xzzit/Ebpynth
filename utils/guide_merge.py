@@ -118,17 +118,25 @@ def merge_guides(guides, style_shape, style_file):
 
 # Sandbox validation grid execution (run from the repo root: python utils/guide_merge.py)
 if __name__ == "__main__":
-    style_path = "examples/video/output_frames/000.png"
+    # examples/facestyle is the most demanding real case for this module: three guides
+    # merged at once, and Gapp ships as a grayscale PNG so it collapses to a different
+    # channel count than the two RGB guides — exercising both the torch.cat packing and
+    # the per-guide channel bookkeeping in one shot.
+    style_path = "examples/facestyle/source_painting.png"
     style = load_image_to_vram(style_path)
     guides = [
-        {"source": "examples/video/video_frames/000.jpg", "target": "examples/video/video_frames/001.jpg", "weight": -1.0},
-        {"source": "examples/video/video_frames/000.jpg", "target": "examples/video/video_frames/002.jpg", "weight": 1.5},
+        {"source": "examples/facestyle/source_Gapp.png", "target": "examples/facestyle/target_Gapp.png", "weight": -1.0},
+        {"source": "examples/facestyle/source_Gseg.png", "target": "examples/facestyle/target_Gseg.png", "weight": 1.5},
+        {"source": "examples/facestyle/source_Gpos.png", "target": "examples/facestyle/target_Gpos.png", "weight": 1.5},
     ]
     src_merged, tgt_merged, channels = merge_guides(guides, style.shape, style_path)
     print("🏆 Guide Merging Engine Test Passed!")
     print(f"  source_guides: {src_merged.shape}, {src_merged.dtype}, {src_merged.device}, contiguous={src_merged.is_contiguous()}")
     print(f"  target_guides: {tgt_merged.shape}, {tgt_merged.dtype}, {tgt_merged.device}, contiguous={tgt_merged.is_contiguous()}")
     print(f"  per-guide channels: {channels}")
+    assert src_merged.shape[:2] == style.shape[:2], "merged source guides must keep the style resolution"
+    assert src_merged.shape[-1] == tgt_merged.shape[-1] == sum(channels), \
+        "merged channel count must equal the sum of the per-guide counts"
 
     # Synthetic channel-alignment check: 1-channel source vs 3-channel target must align to 3
     gray = torch.full((4, 4, 1), 7, dtype=torch.uint8, device="cuda")
