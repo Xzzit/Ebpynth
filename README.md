@@ -9,6 +9,21 @@ itself — as readable, debuggable PyTorch tensor code. No C++/CUDA is compiled 
 (roughly an order of magnitude slower than the native kernel) for clarity: every stage is a plain tensor operation
 you can step through, inspect, and modify.
 
+## Dependencies
+
+Tested With:
+
+* Windows 11 & Ubuntu 26.04 (Reconmended)
+* Python 3.10
+* Pytorch 2.13.0 (cuda 13.2)
+* 5070 Ti GPU
+
+```
+conda create -n ebpynth python=3.10
+conda activate ebpynth
+pip install -r requirements.txt
+```
+
 ## Project structure
 
 ```
