@@ -30,8 +30,9 @@ target guide is aligned with the output you want. Weights are optional trailing 
 
 Four self-contained use cases live in `examples/`. Every grid below reads **left to right: guides, then style**,
 and **top to bottom: source, then target** — so the bottom-right cell is the synthesized result. Where an example
-has several guides they sit side by side in one cell, in the order named in the column header. Each command
-writes exactly the `output.png` shown, so you can reproduce any of them verbatim.
+has several guides they sit side by side in one cell, in the order named in the column header. Each command writes
+the `output.png` shown — though PatchMatch is randomized and no seed is fixed, so your run will differ in fine
+detail. Equivalent, not identical.
 
 ### 1. Video frame
 

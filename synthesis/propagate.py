@@ -20,9 +20,20 @@ def propagate(nnf, cost, combined_source, combined_target_padded, patch_size, un
     For each jump distance j and each of 4 directions (-j,0)/(+j,0)/(0,-j)/(0,+j):
     "if my neighbor j pixels away uses source position s for itself, then s - offset
     is what my own patch would use under that same alignment — worth trying."
-    Directions are tried one at a time, not batched, each immediately updating the
-    running best, so a later direction's comparison — and, with uniformity enabled,
-    its occupancy bookkeeping — always sees the outcome of the earlier ones.
+
+    All four directions of a jump are scored in ONE batched patch_cost call and then
+    resolved together, incumbent included, by a single argmin. The engine is bound by
+    kernel-launch overhead, not bandwidth, so scoring 4 candidates at once costs 4x
+    the bytes but roughly the same number of dispatches — and it collapses four
+    Uniformity.update scatters into one. The incumbent sits at index 0 so argmin's
+    tie-break to the lowest index keeps the original rule: a candidate must be
+    strictly better to displace it.
+
+    The trade: directions no longer cascade. Each is scored against the jump's
+    starting NNF rather than against whatever an earlier direction just accepted.
+    Measured across all three examples this lands within the run-to-run noise of the
+    sequential version while cutting total runtime, so the cascade was not carrying
+    its weight.
 
     Args:
         nnf: int64 CUDA tensor, shape (H_target, W_target, 2), (y, x) source coords.
@@ -42,7 +53,7 @@ def propagate(nnf, cost, combined_source, combined_target_padded, patch_size, un
         torch.arange(tgt_h, device=nnf.device), torch.arange(tgt_w, device=nnf.device), indexing="ij")
 
     for jump in (4, 2, 1):
-        best_nnf, best_cost = nnf, cost
+        cand_nnfs, valids = [], []
         for oy, ox in ((-jump, 0), (jump, 0), (0, -jump), (0, jump)):
             # Clamped (not wrapped) neighbor lookup — a wraparound would pull in a
             # candidate from the opposite edge of the image, which is meaningless.
@@ -52,28 +63,34 @@ def propagate(nnf, cost, combined_source, combined_target_padded, patch_size, un
 
             cand_y = neighbor_val[..., 0] - oy
             cand_x = neighbor_val[..., 1] - ox
-            valid = (cand_y >= r_patch) & (cand_y <= src_h - 1 - r_patch) & \
-                    (cand_x >= r_patch) & (cand_x <= src_w - 1 - r_patch)
-            # Clamp so the gather below is always safe; invalid candidates are
-            # rejected anyway via the +inf cost override two lines down.
-            cand_nnf = torch.stack([
+            valids.append((cand_y >= r_patch) & (cand_y <= src_h - 1 - r_patch) &
+                          (cand_x >= r_patch) & (cand_x <= src_w - 1 - r_patch))
+            # Clamp so the gather stays safe; invalid candidates are rejected anyway
+            # via the +inf cost override below.
+            cand_nnfs.append(torch.stack([
                 torch.clamp(cand_y, r_patch, src_h - 1 - r_patch),
                 torch.clamp(cand_x, r_patch, src_w - 1 - r_patch),
-            ], dim=-1)
+            ], dim=-1))
 
-            cand_cost = patch_cost(cand_nnf, combined_source, combined_target_padded, patch_size)
-            cand_cost = torch.where(valid, cand_cost, torch.full_like(cand_cost, float("inf")))
+        cand_nnf = torch.stack(cand_nnfs)                                  # (4, H, W, 2)
+        valid = torch.stack(valids)                                        # (4, H, W)
+        cand_cost = patch_cost(cand_nnf, combined_source, combined_target_padded, patch_size)
+        cand_cost = torch.where(valid, cand_cost, torch.full_like(cand_cost, float("inf")))
 
-            if uniformity is None:
-                improved = cand_cost < best_cost
-            else:
-                improved = uniformity.score(cand_cost, cand_nnf) < uniformity.score(best_cost, best_nnf)
-                uniformity.update(best_nnf, cand_nnf, improved)
+        # Incumbent at index 0, so argmin ties resolve to "keep what I have"
+        all_nnf = torch.cat([nnf.unsqueeze(0), cand_nnf])                  # (5, H, W, 2)
+        all_cost = torch.cat([cost.unsqueeze(0), cand_cost])               # (5, H, W)
+        if uniformity is None:
+            winner = all_cost.argmin(0)
+        else:
+            winner = torch.cat([uniformity.score(cost, nnf).unsqueeze(0),
+                                uniformity.score(cand_cost, cand_nnf)]).argmin(0)
 
-            best_nnf = torch.where(improved.unsqueeze(-1), cand_nnf, best_nnf)
-            best_cost = torch.where(improved, cand_cost, best_cost)
-
-        nnf, cost = best_nnf, best_cost
+        new_nnf = all_nnf.gather(0, winner[None, ..., None].expand(1, tgt_h, tgt_w, 2)).squeeze(0)
+        new_cost = all_cost.gather(0, winner[None]).squeeze(0)
+        if uniformity is not None:
+            uniformity.update(nnf, new_nnf, winner != 0)
+        nnf, cost = new_nnf, new_cost
 
     return nnf, cost
 

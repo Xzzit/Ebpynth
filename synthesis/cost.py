@@ -91,24 +91,33 @@ def patch_cost(nnf, combined_source, combined_target_padded, patch_size):
     No weight argument: both inputs arrive pre-scaled by √weight, so a plain squared
     difference already IS the weighted SSD (see build_channel_scales).
 
-    Batching all patch_size² offsets into one gather was tried and is a large net
-    loss — it materialises a (H·W, patch_size², C) intermediate (1.5 GB at 540x960,
-    8 GB on the stylit example) and the extra memory traffic costs far more than the
-    saved dispatches. Keep the loop streaming.
+    **Rank-agnostic in the NNF's leading dimensions.** Pass a stacked
+    (B, H_target, W_target, 2) NNF and you get (B, H_target, W_target) back for the
+    same op count — the source gather widens to (B, H, W, C) and the target slice
+    broadcasts across B. propagate uses this to score all four of a jump's directions
+    in one call. It is the only lever left on the dominant cost here, because the
+    engine is dispatch-bound: B candidates cost B times the bytes but the same number
+    of kernel launches.
+
+    Keep B small. Batching the patch_size² OFFSETS this way instead was tried and is
+    a large net loss — it materialises a (H·W, patch_size², C) intermediate (1.5 GB at
+    540x960, 8 GB on the stylit example) and the extra memory traffic costs far more
+    than the saved dispatches. B=4 is ~50 MB per offset on frame and pays off; B=25
+    was catastrophic. Keep the offset loop streaming.
 
     Args:
-        nnf: int64 CUDA tensor, shape (H_target, W_target, 2), (y, x) source coords.
+        nnf: int64 CUDA tensor, shape (..., H_target, W_target, 2), (y, x) source coords.
         combined_source: float32 CUDA tensor, shape (H_source, W_source, C), √w-scaled.
         combined_target_padded: float32 CUDA tensor, shape (H_target+2r, W_target+2r, C),
                                  as returned by pad_target.
         patch_size: odd int, side length of the square patch.
 
     Returns:
-        float32 CUDA tensor, shape (H_target, W_target) — per-pixel patch cost.
+        float32 CUDA tensor, shape nnf.shape[:-1] — per-pixel patch cost.
     """
     r = patch_size // 2
     src_h, src_w, channels = combined_source.shape
-    tgt_h, tgt_w = nnf.shape[0], nnf.shape[1]
+    tgt_h, tgt_w = nnf.shape[-3], nnf.shape[-2]
     src_flat = combined_source.reshape(-1, channels)
 
     # Flat source index of each patch CENTER, hoisted: the per-offset index is then
@@ -116,7 +125,7 @@ def patch_cost(nnf, combined_source, combined_target_padded, patch_size):
     # NNF's two coordinate planes every iteration.
     base = nnf[..., 0] * src_w + nnf[..., 1]
 
-    cost = torch.zeros((tgt_h, tgt_w), dtype=torch.float32, device=nnf.device)
+    cost = torch.zeros(nnf.shape[:-1], dtype=torch.float32, device=nnf.device)
     for dy in range(-r, r + 1):
         for dx in range(-r, r + 1):
             s_val = src_flat[base + (dy * src_w + dx)]
