@@ -28,11 +28,11 @@ target guide is aligned with the output you want. Weights are optional trailing 
 
 ## Examples
 
-Four self-contained use cases live in `examples/`. Every grid below reads **left to right: guides, then style**,
-and **top to bottom: source, then target** — so the bottom-right cell is the synthesized result. Where an example
-has several guides they sit side by side in one cell, in the order named in the column header. Each command writes
-the `output.png` shown — though PatchMatch is randomized and no seed is fixed, so your run will differ in fine
-detail. Equivalent, not identical.
+Five self-contained use cases live in `examples/`. The still-image grids read **left to right: guides, then
+style**, and **top to bottom: source, then target** — so the bottom-right cell is the synthesized result. Where an
+example has several guides they sit side by side in one cell, in the order named in the column header. Each
+command writes the `output.png` shown — though PatchMatch is randomized and no seed is fixed, so your run will
+differ in fine detail. Equivalent, not identical.
 
 ### 1. Video frame
 
@@ -51,7 +51,34 @@ python stylize.py \
 | **Source** | <img src="examples/frame/source_frame.jpg" alt="source frame" width="390"> | <img src="examples/frame/source_painting.jpg" alt="source painting" width="390"> |
 | **Target** | <img src="examples/frame/target_frame.jpg" alt="target frame" width="390"> | <a href="examples/frame/output.png"><img src="examples/frame/output.png" alt="synthesized frame" width="390"></a> |
 
-### 2. Face portrait
+### 2. Video
+
+A whole clip stylized from a handful of painted keyframes, via `stylize_video.py`. The engine is unchanged; only
+the guides differ. Alongside colour and edge, two extra guides carry the time axis: a *positional* guide (an
+identity coordinate ramp advected by optical flow) and a *temporal* guide (the previous output warped into the
+current frame). Each output feeds the next frame's temporal guide, so synthesis is one chain rather than 100
+independent runs — which is what stops it flickering.
+
+```bash
+python stylize_video.py \
+  -video examples/video/cat_full.mp4 \
+  -styledir examples/video/style \
+  -output examples/video/cat_styled.mp4
+```
+
+|  | 100 frames, 960x540, 20 fps |
+|:--:|:--:|
+| **Source** | <img src="examples/video/preview_source.webp" alt="source clip" width="480"> |
+| **Stylized** | <img src="examples/video/preview_styled.webp" alt="stylized clip" width="480"> |
+
+Keyframes live in `examples/video/style/` as `style<frame>.png`. The frame number is only a hint — each one is
+re-matched against the video by edge correlation, since a stylized frame keeps its source's geometry but none of
+its palette, and a silent off-by-one would misalign every guide derived from it.
+
+Roughly 7 s per frame, and each frame is synthesized twice (forward from the previous keyframe, backward from the
+next) before being crossfaded, so budget ~35 minutes for 100 frames. Add `-maxframes 7` for a quick smoke test.
+
+### 3. Face portrait
 
 A portrait painting's style transferred onto a photo while preserving the subject's identity, using three
 facial-landmark-derived guides instead of raw pixels: `Gapp` (target luminance matched to the painting),
@@ -71,7 +98,7 @@ python stylize.py \
 | **Source** | <img src="examples/facestyle/source_Gapp.png" alt="source Gapp" width="150"> <img src="examples/facestyle/source_Gseg.png" alt="source Gseg" width="150"> <img src="examples/facestyle/source_Gpos.png" alt="source Gpos" width="150"> | <img src="examples/facestyle/source_painting.png" alt="source painting" width="300"> |
 | **Target** | <img src="examples/facestyle/target_Gapp.png" alt="target Gapp" width="150"> <img src="examples/facestyle/target_Gseg.png" alt="target Gseg" width="150"> <img src="examples/facestyle/target_Gpos.png" alt="target Gpos" width="150"> | <a href="examples/facestyle/output.png"><img src="examples/facestyle/output.png" alt="synthesized portrait" width="300"></a> |
 
-### 3. Texture by numbers
+### 4. Texture by numbers
 
 A photo resynthesized from a hand-painted target segmentation map, from a single guide pair. Wants a smaller
 patch and a lighter uniformity penalty than the defaults.
@@ -89,7 +116,7 @@ python stylize.py \
 | **Source** | <img src="examples/texbynum/source_segment.png" alt="source segmentation" width="270"> | <img src="examples/texbynum/source_photo.png" alt="source photo" width="270"> |
 | **Target** | <img src="examples/texbynum/target_segment.png" alt="target segmentation" width="270"> | <a href="examples/texbynum/output.png"><img src="examples/texbynum/output.png" alt="synthesized texture" width="270"></a> |
 
-### 4. StyLit
+### 5. StyLit
 
 A hand-painted, non-photorealistic shading style (an illuminated ball in colored pencil) transferred onto a
 3D render, guided by four path-traced lighting passes instead of raw pixel color: `fullgi` (full global
@@ -113,6 +140,10 @@ python stylize.py \
 
 ## Options
 
+For `stylize.py`. `stylize_video.py` accepts the tuning flags below (`-uniformity`, `-patchsize`,
+`-pyramidlevels`, `-searchvoteiters`, `-patchmatchiters`, `-extrapass3x3`) plus its own `-video`, `-styledir`,
+`-height`, `-maxframes` and `-smallflow`; see `python stylize_video.py --help`.
+
 | Flag | Default | Meaning |
 |---|---|---|
 | `-style <path> [weight]` | required, weight `1.0` | Style keyframe; its pixels are the only source of output color. |
@@ -131,6 +162,7 @@ python stylize.py \
 ```
 Ebpynth/
 ├── stylize.py                   # CLI entry point — the whole pipeline, including the pyramid and match/vote loops, written out step by step
+├── stylize_video.py             # Video entry point — keyframe propagation, crossfading, and its own copy of the match/vote loop
 │
 ├── arguments/
 │   └── parser.py                # Parses and validates CLI arguments
@@ -149,8 +181,14 @@ Ebpynth/
 │   ├── pyramid.py                # Pyramid math: level sizes, image resizing, NNF upscaling
 │   └── uniformity.py             # Penalizes overused source patches
 │
+├── video/                        # Video-only building blocks, used by stylize_video.py
+│   ├── frames.py                 # Decodes/encodes video as CUDA uint8 frame tensors
+│   ├── flow.py                   # RAFT optical flow + the warp used by both time-axis guides
+│   └── guides.py                 # Edge guide and the identity coordinate ramp
+│
 └── examples/                     # Sample style/guide assets, one folder per use case
-    ├── frame/                    # Video frame stylization
+    ├── frame/                    # Single-frame stylization
+    ├── video/                    # Full clip + painted keyframes
     ├── facestyle/                # Face portrait stylization
     ├── texbynum/                 # Texture-by-numbers
     └── stylit/                   # Illumination-guided 3D render stylization

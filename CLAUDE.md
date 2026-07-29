@@ -37,8 +37,10 @@ Established working rhythm the user expects: **one task/change at a time, with u
 ## Commands
 
 Conda env is **`ebpynth`** (`E:\Miniconda\envs\ebpynth`), torch 2.13.0+cu132 / torchvision 0.28.0, CUDA available
-(RTX 5070 Ti). There is no test suite and no lint config — modules self-test via `if __name__ == "__main__"`
-sandbox blocks with asserts. Run everything **from the repo root**.
+(RTX 5070 Ti). `opencv-python`, `imageio` and `imageio-ffmpeg` are installed for the video pipeline only — the
+image pipeline still needs nothing but torch/torchvision/Pillow. There is no test suite and no lint config —
+modules self-test via `if __name__ == "__main__"` sandbox blocks with asserts. Run everything **from the repo
+root**.
 
 ```bash
 python utils/pyramid_plan.py    # pyramid level-count / weight-spreading asserts (pure CPU)
@@ -47,15 +49,23 @@ python synthesis/pyramid.py     # level_size + upscale_nnf math checks
 python synthesis/vote.py        # identity-NNF exactness + debug mosaics into examples/temp/
 python synthesis/propagate.py   # synthetic identity-guide convergence (propagate + random_search together)
 python synthesis/uniformity.py  # occupancy-flattening check (expect var ~40000 -> ~27000, peak 884 -> 723)
+python video/flow.py            # warp sign convention against synthetic flows (no model download)
+python video/guides.py          # identity-ramp axis order + edge-guide response
 ```
 
-All six pass. `arguments/parser.py` and `utils/image_io.py` intentionally have no sandbox block — they're covered
-only by a full pipeline run.
+All eight pass. `arguments/parser.py`, `utils/image_io.py` and `video/frames.py` intentionally have no sandbox
+block — they're covered only by a full pipeline run.
 
-Full pipeline (~25s for the 960x540 `frame` example with defaults + extrapass3x3):
+Full pipeline (~6s for the 960x540 `frame` example with defaults + extrapass3x3):
 
 ```bash
 python stylize.py -style examples/frame/source_painting.jpg -guide examples/frame/source_frame.jpg examples/frame/target_frame.jpg -output examples/frame/output.png -extrapass3x3
+```
+
+Video stylization (`examples/video/`, ~30 min for 100 frames — see the Video section below):
+
+```bash
+python stylize_video.py -maxframes 7 -outdir examples/video/out_smoke -output examples/video/smoke.mp4
 ```
 
 `examples/` has four use cases, each self-contained with a committed `output.png` for visual comparison:
@@ -147,6 +157,48 @@ bounds checks anywhere.
   acceptance. **One instance per pyramid level**, built in `stylize.py` from that level's starting NNF and threaded
   through every `propagate`/`random_search` call for the whole level — its state accumulates across all
   vote/patchmatch iterations, matching the original Omega's lifetime. Pass `uniformity=None` to disable.
+
+### Video stylization — `stylize_video.py` + `video/`
+
+A **second top-level program**, not a new stage of the image pipeline. It reuses the engine unchanged; only the
+guides differ. `video/` holds its leaf blocks the way `synthesis/` does for the image path: `frames.py` (decode /
+encode), `flow.py` (RAFT wrapper + `warp`), `guides.py` (`edge_guide`, `identity_ramp`).
+
+Four guide pairs per frame, weights in `GUIDE_WEIGHTS`, channels `[3, 1, 3, 3]`:
+
+| guide | source side | target side | weight |
+|---|---|---|---|
+| colour | `video[k]` | `video[t]` | 6.0 |
+| edge | `edges(video[k])` | `edges(video[t])` | 1.0 |
+| positional | identity ramp | ramp advected by accumulated flow | 2.0 |
+| temporal | `style[k]` | `warp(output[t-1])` | 0.5 |
+
+**The temporal pair is the whole ballgame.** Each output becomes the next frame's temporal target, so synthesis is
+a chain, not N independent runs — that is what stops every frame from picking its own unrelated patches and
+flickering. Note its *source* side is the stylized keyframe itself, not the previous frame: the question being
+asked is "in style space, does the patch I'm about to copy match what was here a frame ago".
+
+Each frame between two keyframes is synthesized twice, forward from the earlier keyframe and backward from the
+later one, then linearly crossfaded by distance. So the cost is ~2 syntheses per frame.
+
+`stylize_video.py` has its **own** copy of the pyramid + match/vote loop, in `synthesize()`. This is a deliberate
+exception to the "no orchestration wrappers" rule, which exists to keep `stylize.py:main()` readable end to end —
+it is not a reason to make the video driver import a wrapper that would have to be carved out of `stylize.py` and
+gut it. The two loops will also diverge (NNF warm-start is the obvious next step here and makes no sense for the
+image path). If you change the engine's call sequence, change it in both.
+
+**Two facts about `examples/video/`, both established by measurement, not assumption:**
+- `cat_full.mp4` is **960x544, 100 frames, 20 fps**, but the keyframes are **960x540**. 544 is the encoder padding
+  540 up to a multiple of 16, and the padding is at the **bottom** (rows 542 and 543 are byte-identical; top-crop
+  scores edge-correlation 0.276 against bottom-crop's 0.318). Hence `-height 540`, which keeps rows `0:540`.
+  `write_video` must pass `macro_block_size=1` or imageio silently pads it straight back to 544.
+- **Keyframe filenames are only a hint.** `style010.png` actually matches frame **11** (edge correlation 0.327 vs
+  0.283); the other seven are exact. `locate_keyframe` re-derives the index from downsampled edge maps — pixels
+  are useless for this, since a stylized frame shares its source's geometry but none of its palette. A silent
+  off-by-one here misaligns every guide derived from that keyframe.
+
+Keyframes sit at 0, 2, 3, 6, 10, 14, 19, 99 — dense at the head, then a **79-frame gap**. Frames 20–98 can only be
+reached by propagating ~40 frames from either side, so drift there is a property of the input, not a bug to fix.
 
 ### In `stylize.py` itself
 
